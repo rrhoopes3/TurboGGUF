@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "turbogguf"
+version = "0.1.0"
+description = "Rotation-aware GGUF quantizer: Q2 quality that performs like Q4"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1.0",
+    "transformers>=4.36.0",
+    "safetensors>=0.4.0",
+    "accelerate>=0.25.0",
+    "sentencepiece>=0.1.99",
+    "click>=8.1.0",
+    "tqdm>=4.66.0",
+]
+
+[project.optional-dependencies]
+eval = ["datasets>=2.16.0", "lm-eval>=0.4.0"]
+dev = ["pytest>=7.4.0", "pytest-cov>=4.1.0"]
+
+[project.scripts]
+turbogguf = "turbogguf.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["turbogguf*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

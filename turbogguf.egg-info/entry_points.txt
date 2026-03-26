@@ -1,0 +1,2 @@
+[console_scripts]
+turbogguf = turbogguf.cli:cli

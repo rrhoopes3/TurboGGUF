@@ -1,0 +1,15 @@
+torch>=2.1.0
+transformers>=4.36.0
+safetensors>=0.4.0
+accelerate>=0.25.0
+sentencepiece>=0.1.99
+click>=8.1.0
+tqdm>=4.66.0
+
+[dev]
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+[eval]
+datasets>=2.16.0
+lm-eval>=0.4.0
