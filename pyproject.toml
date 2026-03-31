@@ -17,11 +17,14 @@ dependencies = [
     "sentencepiece>=0.1.99",
     "click>=8.1.0",
     "tqdm>=4.66.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
 ]
 
 [project.optional-dependencies]
 eval = ["datasets>=2.16.0", "lm-eval>=0.4.0"]
 dev = ["pytest>=7.4.0", "pytest-cov>=4.1.0"]
+bench = ["matplotlib"]
 
 [project.scripts]
 turbogguf = "turbogguf.cli:cli"

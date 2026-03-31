@@ -84,10 +84,11 @@ turbogguf pipeline \
 ## CLI Commands
 
 ```bash
-turbogguf rotate     # Apply Hadamard rotation to model weights
-turbogguf pipeline   # Full pipeline: rotate → convert → quantize
-turbogguf evaluate   # Compare perplexity of GGUF models
-turbogguf info       # Show memory requirements for a model
+turbogguf rotate       # Apply Hadamard rotation to model weights
+turbogguf pipeline     # Full pipeline: rotate → convert → quantize
+turbogguf evaluate     # Compare perplexity of GGUF models
+turbogguf info         # Show memory requirements for a model
+turbogguf kv-compress  # Show KV cache compression stats (TurboQuant+)
 ```
 
 ## Hardware Requirements
@@ -136,11 +137,47 @@ o_proj: O_head @ H^T  (rotate each head's input)
 
 **Zero runtime cost:** `R^T @ R = I` at every layer boundary. `||Rx|| = ||x||` for orthogonal R. The rotated model is mathematically equivalent.
 
+## TurboQuant+ KV Cache Compression
+
+TurboGGUF includes [TurboQuant+](https://github.com/TheTom/turboquant_plus), a KV cache compression library that complements weight rotation. While TurboGGUF improves **weight quantization** (offline, before GGUF), TurboQuant+ compresses the **KV cache at inference time** using PolarQuant + QJL.
+
+**Combined approach:** Use TurboGGUF rotation for better weight quantization, **plus** TurboQuant+ KV cache compression for reduced memory during inference.
+
+### KV Cache Compression Formats
+
+| Format | Compression | PPL vs q8_0 | Notes |
+|--------|-------------|-------------|-------|
+| turbo4 | 3.8x | +0.23% | Best quality after q8_0 |
+| turbo3 | 4.6-5.1x | +1.06% | Maximum compression balance |
+| turbo2 | 6.4x | +6.48% | Extreme compression |
+
+### Usage
+
+```bash
+# Check KV cache savings for your model
+turbogguf kv-compress --model meta-llama/Llama-3.1-8B --seq-len 8192
+
+# Use with llama.cpp at inference time
+llama-server -m turbo-Q2_K.gguf --cache-type-k turbo3 --cache-type-v turbo3
+```
+
+### Python API
+
+```python
+from turbogguf.turboquant_plus import KVCacheCompressor
+
+compressor = KVCacheCompressor(head_dim=128, k_bits=3, v_bits=3)
+compressed = compressor.compress(k_cache, v_cache)
+k_hat, v_hat = compressor.decompress(compressed)
+print(compressor.memory_stats(seq_len=4096, num_layers=32, num_heads=32))
+```
+
 ## References
 
 - [QuaRot: Outlier-Free 4-Bit Inference in Rotated LLMs](https://arxiv.org/abs/2404.00456) (NeurIPS 2024)
 - [TurboQuant: Redefining AI Efficiency with Extreme Compression](https://arxiv.org/abs/2504.19874) (ICLR 2026)
 - [QuIP#: Even Better LLM Quantization with Hadamard Incoherence](https://arxiv.org/abs/2402.04396) (ICML 2024)
+- [TurboQuant+ (KV Cache Compression)](https://github.com/TheTom/turboquant_plus)
 
 ## Tests
 
