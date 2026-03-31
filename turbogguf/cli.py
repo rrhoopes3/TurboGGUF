@@ -224,5 +224,65 @@ def info(model):
     click.echo(f"Recommended system RAM:   {est['recommended_ram_gb']:.1f} GB")
 
 
+@cli.command("kv-compress")
+@click.option("--head-dim", "-d", default=128, help="Attention head dimension")
+@click.option("--k-bits", default=3, type=click.IntRange(2, 8), help="Bit-width for K cache (default: 3)")
+@click.option("--v-bits", default=3, type=click.IntRange(2, 8), help="Bit-width for V cache (default: 3)")
+@click.option("--seq-len", "-s", default=4096, help="Sequence length to estimate for")
+@click.option("--num-layers", "-l", default=32, help="Number of transformer layers")
+@click.option("--num-heads", "-n", default=32, help="Number of attention heads")
+@click.option("--model", "-m", help="HuggingFace model ID (auto-detect head-dim/layers/heads)")
+def kv_compress(head_dim, k_bits, v_bits, seq_len, num_layers, num_heads, model):
+    """Show KV cache compression stats using TurboQuant+.
+
+    Computes memory savings from compressing the KV cache with
+    PolarQuant + QJL (TurboQuant, ICLR 2026). Use alongside TurboGGUF
+    weight rotation for maximum compression.
+
+    \b
+    Usage with llama.cpp:
+      --cache-type-k turbo3 --cache-type-v turbo3
+    """
+    if model:
+        try:
+            from transformers import AutoConfig
+            config = AutoConfig.from_pretrained(model)
+            head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+            num_layers = config.num_hidden_layers
+            num_heads = config.num_attention_heads
+            click.echo(f"Model: {model}")
+            click.echo(f"  Layers: {num_layers}, Heads: {num_heads}, Head dim: {head_dim}")
+            click.echo()
+        except Exception as e:
+            click.echo(f"Warning: could not load model config ({e}), using provided values")
+
+    from turbogguf.turboquant_plus.kv_cache import KVCacheCompressor
+
+    compressor = KVCacheCompressor(head_dim=head_dim, k_bits=k_bits, v_bits=v_bits)
+    stats = compressor.memory_stats(seq_len=seq_len, num_layers=num_layers, num_heads=num_heads)
+
+    click.echo("KV Cache Compression (TurboQuant+)")
+    click.echo("=" * 50)
+    click.echo(f"Config: K={k_bits}-bit (TurboQuant), V={v_bits}-bit (PolarQuant MSE)")
+    click.echo(f"Head dim: {head_dim}, Layers: {num_layers}, Heads: {num_heads}")
+    click.echo(f"Sequence length: {seq_len:,}")
+    click.echo()
+    click.echo(f"Original KV cache (FP16):  {stats['original_mb']:,.1f} MB")
+    click.echo(f"Compressed KV cache:       {stats['compressed_mb']:,.1f} MB")
+    click.echo(f"Compression ratio:         {stats['compression_ratio']:.1f}x")
+    click.echo(f"Memory saved:              {stats['original_mb'] - stats['compressed_mb']:,.1f} MB")
+    click.echo()
+
+    # Show recommendations
+    click.echo("Recommended llama.cpp flags:")
+    cache_type_k = f"turbo{k_bits}" if k_bits <= 4 else f"q{k_bits}_0"
+    cache_type_v = f"turbo{v_bits}" if v_bits <= 4 else f"q{v_bits}_0"
+    click.echo(f"  --cache-type-k {cache_type_k} --cache-type-v {cache_type_v}")
+    click.echo()
+    click.echo("Combine with TurboGGUF weight rotation for maximum savings:")
+    click.echo("  turbogguf pipeline --model <MODEL> --quant Q2_K --output model.gguf \\")
+    click.echo("    --llama-cpp /path/to/llama.cpp")
+
+
 if __name__ == "__main__":
     cli()

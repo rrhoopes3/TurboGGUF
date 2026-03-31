@@ -1,8 +1,10 @@
+LICENSE
 README.md
 pyproject.toml
 tests/test_hadamard.py
 tests/test_rotation.py
 tests/test_roundtrip.py
+tests/test_turboquant_plus.py
 turbogguf/__init__.py
 turbogguf/cli.py
 turbogguf/evaluate.py
@@ -21,3 +23,13 @@ turbogguf/arch/base.py
 turbogguf/arch/llama.py
 turbogguf/arch/mistral.py
 turbogguf/arch/qwen2.py
+turbogguf/turboquant_plus/__init__.py
+turbogguf/turboquant_plus/codebook.py
+turbogguf/turboquant_plus/hw_replay.py
+turbogguf/turboquant_plus/kv_cache.py
+turbogguf/turboquant_plus/outlier.py
+turbogguf/turboquant_plus/polar_quant.py
+turbogguf/turboquant_plus/qjl.py
+turbogguf/turboquant_plus/rotation.py
+turbogguf/turboquant_plus/turboquant.py
+turbogguf/turboquant_plus/utils.py
