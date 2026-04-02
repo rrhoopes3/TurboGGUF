@@ -60,10 +60,22 @@ class ArchHandler(ABC):
     def get_hidden_size(self, model: nn.Module) -> int:
         """Return the hidden dimension size."""
 
+    def get_pre_ffn_norm(self, layer: nn.Module):
+        """Return pre-feedforward norm if this architecture has one (e.g., Gemma sandwich norms)."""
+        return None
+
+    def get_post_ffn_norm(self, layer: nn.Module):
+        """Return post-feedforward norm if this architecture has one (e.g., Gemma sandwich norms)."""
+        return None
+
     def uses_rms_norm(self) -> bool:
         """Whether this architecture uses RMSNorm (True) or LayerNorm (False)."""
         return True
 
     def has_bias(self) -> bool:
         """Whether linear layers have bias terms."""
+        return False
+
+    def has_tied_lm_head(self, model: nn.Module) -> bool:
+        """Whether lm_head weights are tied to embedding weights."""
         return False

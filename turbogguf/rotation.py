@@ -190,18 +190,45 @@ def fuse_all_norms(model: nn.Module, handler: ArchHandler) -> None:
             [attn["q_proj"], attn["k_proj"], attn["v_proj"]],
         )
 
-        # Post-attention norm → feeds into gate, up projections
         post_norm = handler.get_post_attn_norm(layer)
         mlp = handler.get_mlp_projs(layer)
-        fuse_rms_norm_into_linear(
-            post_norm,
-            [mlp["gate_proj"], mlp["up_proj"]],
-        )
 
-    # Final norm → feeds into lm_head
+        # Check for sandwich norms (Gemma 4): pre/post feedforward norms
+        # wrap the MLP block separately from the attention norms.
+        pre_ffn = handler.get_pre_ffn_norm(layer)
+        if pre_ffn is not None:
+            # Sandwich norm pattern: pre_ffn feeds into gate/up,
+            # post_attn and post_ffn normalize residual outputs (not
+            # linear inputs), so we set them to identity.
+            fuse_rms_norm_into_linear(
+                pre_ffn,
+                [mlp["gate_proj"], mlp["up_proj"]],
+            )
+            post_norm.weight.data.fill_(1.0)
+            post_ffn = handler.get_post_ffn_norm(layer)
+            if post_ffn is not None:
+                post_ffn.weight.data.fill_(1.0)
+        else:
+            # Standard pre-norm pattern (LLaMA, Mistral, Qwen2):
+            # post_attn_norm feeds into gate, up projections
+            fuse_rms_norm_into_linear(
+                post_norm,
+                [mlp["gate_proj"], mlp["up_proj"]],
+            )
+
+    # Final norm → feeds into lm_head (or embedding if tied)
     final_norm = handler.get_final_norm(model)
     lm_head = handler.get_lm_head(model)
-    fuse_rms_norm_into_linear(final_norm, [lm_head])
+    if lm_head is not None:
+        fuse_rms_norm_into_linear(final_norm, [lm_head])
+    else:
+        # Tied weights: lm_head shares weight with embed_tokens.
+        # Fuse gamma into embedding weights directly.
+        emb = handler.get_embedding(model)
+        gamma = final_norm.weight.data.float()
+        dtype = emb.weight.dtype
+        emb.weight.data = (emb.weight.data.float() * gamma[None, :]).to(dtype)
+        final_norm.weight.data.fill_(1.0)
 
 
 @torch.no_grad()
@@ -248,8 +275,11 @@ def apply_R1(
         rotate_weight_left(attn["o_proj"], Q, transpose=True)
         rotate_weight_left(mlp["down_proj"], Q, transpose=True)
 
-    # LM head: absorbs R from final residual
-    rotate_weight_right(handler.get_lm_head(model), Q)
+    # LM head: absorbs R from final residual.
+    # Skip if tied to embedding (already rotated via rotate_embedding above).
+    lm_head = handler.get_lm_head(model)
+    if lm_head is not None and not handler.has_tied_lm_head(model):
+        rotate_weight_right(lm_head, Q)
 
 
 @torch.no_grad()

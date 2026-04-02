@@ -25,14 +25,29 @@ def cli():
     pass
 
 
+def _parse_max_memory(max_memory_str):
+    """Parse --max-memory JSON string into dict.
+
+    Examples:
+        '{"cpu": "50GB", "cuda:0": "22GB"}'
+        '{"cpu": "55GB"}'
+    """
+    if not max_memory_str:
+        return None
+    import json
+    return json.loads(max_memory_str)
+
+
 @cli.command()
 @click.option("--model", "-m", required=True, help="HuggingFace model ID or local path")
 @click.option("--output", "-o", required=True, help="Output directory for rotated model")
 @click.option("--seed", default=42, help="Random seed for Hadamard rotation")
 @click.option("--no-r2", is_flag=True, help="Skip per-head R2 rotation")
 @click.option("--dtype", default="float16", type=click.Choice(["float16", "bfloat16"]))
+@click.option("--device-map", default="cpu", help="Device map: 'cpu', 'auto', or 'cuda:0'")
+@click.option("--max-memory", default=None, help='Max memory JSON, e.g. \'{"cpu": "50GB", "cuda:0": "22GB"}\'')
 @click.option("--trust-remote-code", is_flag=True, help="Trust remote code for model loading")
-def rotate(model, output, seed, no_r2, dtype, trust_remote_code):
+def rotate(model, output, seed, no_r2, dtype, device_map, max_memory, trust_remote_code):
     """Apply Hadamard rotation to model weights.
 
     Loads a HuggingFace model, fuses RMSNorm weights, applies R1+R2
@@ -46,14 +61,19 @@ def rotate(model, output, seed, no_r2, dtype, trust_remote_code):
     from turbogguf.export import export_rotated_model
 
     dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16}
+    mem = _parse_max_memory(max_memory)
 
     click.echo(f"TurboGGUF v0.1.0 — Rotating {model}")
     click.echo(f"Seed: {seed}, R2: {'disabled' if no_r2 else 'enabled'}")
+    if mem:
+        click.echo(f"Memory map: {mem}")
     click.echo()
 
     model_obj, tokenizer, handler = load_model(
         model,
         dtype=dtype_map[dtype],
+        device_map=device_map,
+        max_memory=mem,
         trust_remote_code=trust_remote_code,
     )
 
@@ -81,10 +101,12 @@ def rotate(model, output, seed, no_r2, dtype, trust_remote_code):
 @click.option("--seed", default=42, help="Random seed for Hadamard rotation")
 @click.option("--llama-cpp", required=True, help="Path to llama.cpp directory")
 @click.option("--no-r2", is_flag=True, help="Skip per-head R2 rotation")
+@click.option("--device-map", default="cpu", help="Device map: 'cpu', 'auto', or 'cuda:0'")
+@click.option("--max-memory", default=None, help='Max memory JSON, e.g. \'{"cpu": "50GB", "cuda:0": "22GB"}\'')
 @click.option("--trust-remote-code", is_flag=True, help="Trust remote code")
 @click.option("--keep-intermediate", is_flag=True, help="Keep intermediate files")
-def pipeline(model, output, quant, seed, llama_cpp, no_r2, trust_remote_code, keep_intermediate):
-    """Full pipeline: rotate → convert to GGUF → quantize.
+def pipeline(model, output, quant, seed, llama_cpp, no_r2, device_map, max_memory, trust_remote_code, keep_intermediate):
+    """Full pipeline: rotate -> convert to GGUF -> quantize.
 
     One command to go from HuggingFace model to quantized GGUF.
     """
@@ -95,30 +117,49 @@ def pipeline(model, output, quant, seed, llama_cpp, no_r2, trust_remote_code, ke
     from turbogguf.rotation import rotate_model
     from turbogguf.export import export_rotated_model
 
+    mem = _parse_max_memory(max_memory)
+
     llama_cpp_dir = Path(llama_cpp)
-    converter = llama_cpp_dir / "convert_hf_to_gguf.py"
-    quantizer = llama_cpp_dir / "build" / "bin" / "llama-quantize"
 
-    # Try alternative quantizer paths
-    if not quantizer.exists():
-        quantizer = llama_cpp_dir / "llama-quantize"
-    if not quantizer.exists():
-        quantizer = llama_cpp_dir / "build" / "llama-quantize"
-
-    if not converter.exists():
-        click.echo(f"Error: convert_hf_to_gguf.py not found at {converter}")
+    # Find converter script (Python)
+    converter = None
+    for candidate in [
+        llama_cpp_dir / "convert_hf_to_gguf.py",
+        llama_cpp_dir / "repo" / "convert_hf_to_gguf.py",
+    ]:
+        if candidate.exists():
+            converter = candidate
+            break
+    if converter is None:
+        click.echo(f"Error: convert_hf_to_gguf.py not found in {llama_cpp_dir}")
         sys.exit(1)
-    if not quantizer.exists():
-        click.echo(f"Error: llama-quantize not found. Tried multiple paths in {llama_cpp_dir}")
+
+    # Find quantizer binary
+    quantizer = None
+    exe = "llama-quantize.exe" if sys.platform == "win32" else "llama-quantize"
+    for candidate in [
+        llama_cpp_dir / "build" / "bin" / exe,
+        llama_cpp_dir / "bin" / exe,
+        llama_cpp_dir / exe,
+        llama_cpp_dir / "build" / exe,
+    ]:
+        if candidate.exists():
+            quantizer = candidate
+            break
+    if quantizer is None:
+        click.echo(f"Error: {exe} not found. Searched build/bin/, bin/, and root of {llama_cpp_dir}")
         sys.exit(1)
 
     # Step 1: Rotate
     click.echo("=" * 60)
     click.echo("STEP 1/3: Rotating model weights")
     click.echo("=" * 60)
+    if mem:
+        click.echo(f"Memory map: {mem}")
 
     model_obj, tokenizer, handler = load_model(
-        model, dtype=torch.float16, trust_remote_code=trust_remote_code,
+        model, dtype=torch.float16, device_map=device_map, max_memory=mem,
+        trust_remote_code=trust_remote_code,
     )
     metadata = rotate_model(model_obj, handler=handler, seed=seed, apply_r2=not no_r2)
 

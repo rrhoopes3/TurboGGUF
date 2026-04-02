@@ -6,7 +6,7 @@ with memory-efficient strategies for 70B+ parameter models.
 
 import torch
 from typing import Optional, Tuple
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoModel, AutoTokenizer, PreTrainedModel
 
 from turbogguf.arch import get_handler
 from turbogguf.arch.base import ArchHandler
@@ -18,12 +18,15 @@ def load_model(
     device_map: str = "cpu",
     max_memory: Optional[dict] = None,
     trust_remote_code: bool = False,
-) -> Tuple[AutoModelForCausalLM, AutoTokenizer, ArchHandler]:
+) -> Tuple[PreTrainedModel, AutoTokenizer, ArchHandler]:
     """Load a HuggingFace model for rotation.
 
     Models are loaded on CPU by default since rotation is pure matrix math
     and doesn't benefit from GPU. For 70B+ models, use device_map="auto"
     with max_memory to shard across CPU RAM.
+
+    Tries AutoModelForCausalLM first (standard text models), then falls back
+    to AutoModel for multimodal wrappers (e.g., Gemma4ForConditionalGeneration).
 
     Args:
         model_id: HuggingFace model ID or local path
@@ -52,7 +55,22 @@ def load_model(
     if max_memory is not None:
         load_kwargs["max_memory"] = max_memory
 
-    model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
+    # Try CausalLM first (works for most text models), fall back to AutoModel
+    # for multimodal wrappers like Gemma4ForConditionalGeneration
+    model = None
+    for auto_cls in [AutoModelForCausalLM, AutoModel]:
+        try:
+            model = auto_cls.from_pretrained(model_id, **load_kwargs)
+            break
+        except (ValueError, KeyError):
+            continue
+
+    if model is None:
+        raise ValueError(
+            f"Could not load model '{model_id}' with AutoModelForCausalLM or AutoModel. "
+            f"Check that the model ID is correct and transformers is up to date."
+        )
+
     model.eval()
 
     handler = get_handler(model)

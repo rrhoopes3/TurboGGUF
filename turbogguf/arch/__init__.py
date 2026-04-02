@@ -4,11 +4,14 @@ from turbogguf.arch.base import ArchHandler
 from turbogguf.arch.llama import LlamaHandler
 from turbogguf.arch.mistral import MistralHandler
 from turbogguf.arch.qwen2 import Qwen2Handler
+from turbogguf.arch.gemma4 import Gemma4Handler
 
 ARCH_REGISTRY = {
     "LlamaForCausalLM": LlamaHandler,
     "MistralForCausalLM": MistralHandler,
     "Qwen2ForCausalLM": Qwen2Handler,
+    "Gemma4ForConditionalGeneration": Gemma4Handler,
+    "Gemma4ForCausalLM": Gemma4Handler,
 }
 
 
