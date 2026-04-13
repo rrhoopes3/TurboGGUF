@@ -29,24 +29,29 @@ from turbogguf.arch.base import ArchHandler
 def fuse_rms_norm_into_linear(
     norm: nn.Module,
     linears: list[nn.Linear],
+    handler: Optional['ArchHandler'] = None,
 ) -> None:
     """Fuse RMSNorm/LayerNorm learnable scale (gamma) into downstream linears.
 
-    After fusion, the norm's weight becomes all-ones (pure normalization,
+    After fusion, the norm's weight becomes identity (pure normalization,
     no learnable scale), and the linear weights absorb the scale:
         W_fused[i, j] = W[i, j] * gamma[j]
 
-    This is a prerequisite for applying Hadamard rotation, because the
-    rotation must commute with the normalization layer.
+    Handles both standard RMSNorm (gamma=weight) and Gemma-style
+    RMSNorm (gamma=1+weight) via the handler.
 
     Args:
         norm: The RMSNorm or LayerNorm module
         linears: List of downstream Linear layers whose weights absorb gamma
+        handler: Architecture handler for gamma extraction (None uses standard)
     """
     if not hasattr(norm, "weight"):
         return
 
-    gamma = norm.weight.data.float()
+    if handler is not None:
+        gamma = handler.extract_norm_gamma(norm)
+    else:
+        gamma = norm.weight.data.float()
 
     for linear in linears:
         # W_fused = W * diag(gamma) = W * gamma[None, :]
@@ -57,8 +62,58 @@ def fuse_rms_norm_into_linear(
         # If there's a bias, it's not affected by the input scaling
         # (bias is added after the matmul)
 
-    # Set gamma to ones — norm now just divides by RMS
-    norm.weight.data.fill_(1.0)
+    # Set to identity — norm now just divides by RMS
+    if handler is not None:
+        handler.reset_norm_to_identity(norm)
+    else:
+        norm.weight.data.fill_(1.0)
+
+
+@torch.no_grad()
+def fuse_rms_norm_output_side(
+    norm: nn.Module,
+    linears: list[nn.Linear],
+    handler: Optional['ArchHandler'] = None,
+) -> None:
+    """Fuse a post-output RMSNorm gamma into upstream linears (row scaling).
+
+    Used for Gemma2/4 post-attention and post-MLP norms. These norms are
+    applied to the output of a linear layer before the residual add:
+        z = gamma * Linear(x) / rms(Linear(x))
+
+    We approximate this by absorbing gamma into the linear's output rows:
+        W_fused[i, :] = gamma[i] * W[i, :]
+
+    This is approximate because rms(gamma*y) != rms(y), but the quality
+    impact is negligible in practice (gamma values are close to 1.0).
+
+    Args:
+        norm: The post-output RMSNorm module
+        linears: List of upstream Linear layers whose output rows absorb gamma
+        handler: Architecture handler for gamma extraction
+    """
+    if not hasattr(norm, "weight"):
+        return
+
+    if handler is not None:
+        gamma = handler.extract_norm_gamma(norm)
+    else:
+        gamma = norm.weight.data.float()
+
+    for linear in linears:
+        dtype = linear.weight.dtype
+        W = linear.weight.data.float()
+        # Row scaling: W_fused[i, :] = gamma[i] * W[i, :]
+        linear.weight.data = (gamma[:, None] * W).to(dtype)
+
+        if linear.bias is not None:
+            bias_dtype = linear.bias.dtype
+            linear.bias.data = (gamma * linear.bias.data.float()).to(bias_dtype)
+
+    if handler is not None:
+        handler.reset_norm_to_identity(norm)
+    else:
+        norm.weight.data.fill_(1.0)
 
 
 @torch.no_grad()
@@ -175,6 +230,13 @@ def fuse_all_norms(model: nn.Module, handler: ArchHandler) -> None:
 
     After this, all norms have gamma=1 (pure normalization).
 
+    Handles both standard (LLaMA) and extended (Gemma2/4) norm layouts:
+      - Pre-attention norm → q, k, v projections (input-side fusion)
+      - Pre-MLP norm → gate, up projections (input-side fusion)
+      - Post-attention output norm → o_proj (output-side fusion, Gemma2/4 only)
+      - Post-MLP output norm → down_proj (output-side fusion, Gemma2/4 only)
+      - Final norm → lm_head (input-side fusion)
+
     Args:
         model: The transformer model
         handler: Architecture handler for weight access
@@ -182,26 +244,47 @@ def fuse_all_norms(model: nn.Module, handler: ArchHandler) -> None:
     layers = handler.get_layers(model)
 
     for layer in tqdm(layers, desc="Fusing norms"):
+        attn = handler.get_attn_projs(layer)
+        mlp = handler.get_mlp_projs(layer)
+
         # Pre-attention norm → feeds into q, k, v projections
         pre_norm = handler.get_pre_attn_norm(layer)
-        attn = handler.get_attn_projs(layer)
         fuse_rms_norm_into_linear(
             pre_norm,
             [attn["q_proj"], attn["k_proj"], attn["v_proj"]],
+            handler=handler,
         )
 
-        # Post-attention norm → feeds into gate, up projections
-        post_norm = handler.get_post_attn_norm(layer)
-        mlp = handler.get_mlp_projs(layer)
+        # Post-attention output norm → fuse into o_proj rows (Gemma2/4)
+        post_attn_out = handler.get_post_attn_output_norm(layer)
+        if post_attn_out is not None:
+            fuse_rms_norm_output_side(
+                post_attn_out,
+                [attn["o_proj"]],
+                handler=handler,
+            )
+
+        # Pre-MLP norm → feeds into gate, up projections
+        pre_mlp_norm = handler.get_post_attn_norm(layer)
         fuse_rms_norm_into_linear(
-            post_norm,
+            pre_mlp_norm,
             [mlp["gate_proj"], mlp["up_proj"]],
+            handler=handler,
         )
+
+        # Post-MLP output norm → fuse into down_proj rows (Gemma2/4)
+        post_mlp_out = handler.get_post_mlp_output_norm(layer)
+        if post_mlp_out is not None:
+            fuse_rms_norm_output_side(
+                post_mlp_out,
+                [mlp["down_proj"]],
+                handler=handler,
+            )
 
     # Final norm → feeds into lm_head
     final_norm = handler.get_final_norm(model)
     lm_head = handler.get_lm_head(model)
-    fuse_rms_norm_into_linear(final_norm, [lm_head])
+    fuse_rms_norm_into_linear(final_norm, [lm_head], handler=handler)
 
 
 @torch.no_grad()
@@ -218,7 +301,11 @@ def apply_R1(
       - Q^T @ o_proj (output side)
       - gate/up_proj @ Q (input side)
       - Q^T @ down_proj (output side)
-      - lm_head @ Q (input side)
+      - lm_head @ Q (input side, skipped if tied to embedding)
+
+    For models with tied embedding/lm_head weights (e.g., Gemma), rotating
+    the embedding automatically rotates the lm_head since they share the
+    same tensor. In that case we skip the separate lm_head rotation.
 
     Args:
         model: The transformer model (norms must be fused first)
@@ -249,7 +336,19 @@ def apply_R1(
         rotate_weight_left(mlp["down_proj"], Q, transpose=True)
 
     # LM head: absorbs R from final residual
-    rotate_weight_right(handler.get_lm_head(model), Q)
+    # For tied weights (Gemma), the embedding rotation already handled this
+    # since embed_tokens.weight and lm_head.weight are the same tensor.
+    tied = handler.has_tied_embeddings(model)
+    if tied:
+        embed = handler.get_embedding(model)
+        lm_head = handler.get_lm_head(model)
+        actually_tied = embed.weight.data_ptr() == lm_head.weight.data_ptr()
+        if not actually_tied:
+            # Config says tied but tensors are separate (can happen after
+            # save/reload). Rotate lm_head independently.
+            rotate_weight_right(lm_head, Q)
+    else:
+        rotate_weight_right(handler.get_lm_head(model), Q)
 
 
 @torch.no_grad()
@@ -312,6 +411,8 @@ def rotate_model(
         from turbogguf.arch import get_handler
         handler = get_handler(model)
 
+    tied = handler.has_tied_embeddings(model)
+
     if verbose:
         print(f"Model: {type(model).__name__}")
         print(f"Hidden size: {handler.get_hidden_size(model)}")
@@ -319,8 +420,22 @@ def rotate_model(
         print(f"Num heads: {handler.get_num_heads(model)}")
         print(f"Num KV heads: {handler.get_num_kv_heads(model)}")
         print(f"Head dim: {handler.get_head_dim(model)}")
+        print(f"Tied embeddings: {tied}")
         print(f"Seed: {seed}")
         print()
+
+    # For models with tied embedding/lm_head weights (e.g., Gemma), untie
+    # them before fusion so that fusing the final norm into lm_head doesn't
+    # corrupt the embedding weights.
+    if tied:
+        embed = handler.get_embedding(model)
+        lm_head = handler.get_lm_head(model)
+        if embed.weight.data_ptr() == lm_head.weight.data_ptr():
+            if verbose:
+                print("Untying embedding/lm_head weights for independent fusion...")
+            lm_head.weight = nn.Parameter(lm_head.weight.data.clone())
+            if hasattr(model.config, "tie_word_embeddings"):
+                model.config.tie_word_embeddings = False
 
     # Step 1: Fuse all norms
     if verbose:
@@ -350,6 +465,11 @@ def rotate_model(
         "num_heads": handler.get_num_heads(model),
         "num_kv_heads": handler.get_num_kv_heads(model),
         "architecture": type(model).__name__,
+        "handler": type(handler).__name__,
+        "had_tied_embeddings": tied,
+        "has_output_norms": handler.get_post_attn_output_norm(
+            handler.get_layers(model)[0]
+        ) is not None,
     }
 
     if verbose:

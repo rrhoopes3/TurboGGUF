@@ -5,7 +5,8 @@ names (e.g., model.model.layers vs model.transformer.h).
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Optional
+import torch
 import torch.nn as nn
 
 
@@ -38,7 +39,12 @@ class ArchHandler(ABC):
 
     @abstractmethod
     def get_post_attn_norm(self, layer: nn.Module) -> nn.Module:
-        """Return the post-attention layer norm."""
+        """Return the norm between attention and MLP (pre-MLP norm).
+
+        For LLaMA this is post_attention_layernorm. For Gemma2 this is
+        pre_feedforward_layernorm. In both cases, this is the norm whose
+        output feeds into the MLP's gate/up projections.
+        """
 
     @abstractmethod
     def get_final_norm(self, model: nn.Module) -> nn.Module:
@@ -60,6 +66,20 @@ class ArchHandler(ABC):
     def get_hidden_size(self, model: nn.Module) -> int:
         """Return the hidden dimension size."""
 
+    def get_post_attn_output_norm(self, layer: nn.Module) -> Optional[nn.Module]:
+        """Return the post-attention output norm (applied to attn output before residual add).
+
+        Only Gemma2/4 have this. Returns None for architectures without it.
+        """
+        return None
+
+    def get_post_mlp_output_norm(self, layer: nn.Module) -> Optional[nn.Module]:
+        """Return the post-MLP output norm (applied to MLP output before residual add).
+
+        Only Gemma2/4 have this. Returns None for architectures without it.
+        """
+        return None
+
     def uses_rms_norm(self) -> bool:
         """Whether this architecture uses RMSNorm (True) or LayerNorm (False)."""
         return True
@@ -67,3 +87,23 @@ class ArchHandler(ABC):
     def has_bias(self) -> bool:
         """Whether linear layers have bias terms."""
         return False
+
+    def has_tied_embeddings(self, model: nn.Module) -> bool:
+        """Whether embedding and lm_head share the same weight tensor."""
+        return False
+
+    def extract_norm_gamma(self, norm: nn.Module) -> torch.Tensor:
+        """Extract the effective scaling factor (gamma) from a norm module.
+
+        Standard RMSNorm: gamma = weight
+        Gemma RMSNorm:    gamma = 1 + weight
+        """
+        return norm.weight.data.clone().float()
+
+    def reset_norm_to_identity(self, norm: nn.Module) -> None:
+        """Reset norm to identity scaling (gamma=1).
+
+        Standard RMSNorm: set weight = 1.0
+        Gemma RMSNorm:    set weight = 0.0 (since gamma = 1 + weight)
+        """
+        norm.weight.data.fill_(1.0)

@@ -77,16 +77,32 @@ def rotate(model, output, seed, no_r2, dtype, trust_remote_code):
 @cli.command()
 @click.option("--model", "-m", required=True, help="HuggingFace model ID or local path")
 @click.option("--output", "-o", required=True, help="Output GGUF file path")
-@click.option("--quant", "-q", default="Q2_K", help="Quantization type (Q2_K, Q3_K_S, Q4_K_M, etc.)")
+@click.option("--quant", "-q", default="Q2_K",
+              help="Quantization type (Q2_K, Q3_K_S, Q4_K_M, IQ2_XXS, IQ3_XXS, IQ4_XS, etc.)")
 @click.option("--seed", default=42, help="Random seed for Hadamard rotation")
 @click.option("--llama-cpp", required=True, help="Path to llama.cpp directory")
 @click.option("--no-r2", is_flag=True, help="Skip per-head R2 rotation")
 @click.option("--trust-remote-code", is_flag=True, help="Trust remote code")
 @click.option("--keep-intermediate", is_flag=True, help="Keep intermediate files")
-def pipeline(model, output, quant, seed, llama_cpp, no_r2, trust_remote_code, keep_intermediate):
-    """Full pipeline: rotate → convert to GGUF → quantize.
+@click.option("--imatrix", is_flag=True,
+              help="Generate importance matrix before quantization (recommended for IQ types)")
+@click.option("--imatrix-dataset", type=click.Path(exists=True),
+              help="Calibration dataset for imatrix (text file, one sample per line)")
+@click.option("--imatrix-file", type=click.Path(),
+              help="Pre-computed .imatrix file to use (skips generation)")
+def pipeline(model, output, quant, seed, llama_cpp, no_r2, trust_remote_code,
+             keep_intermediate, imatrix, imatrix_dataset, imatrix_file):
+    """Full pipeline: rotate -> convert to GGUF -> [imatrix] -> quantize.
 
     One command to go from HuggingFace model to quantized GGUF.
+
+    \b
+    Standard K-quants:   Q2_K, Q3_K_S, Q3_K_M, Q4_K_M, Q5_K_M, Q6_K
+    I-quants (need --imatrix or --imatrix-file):
+                         IQ1_S, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS, IQ4_NL
+
+    I-quants combined with TurboGGUF rotation give the best quality-per-bit.
+    Use --imatrix with a calibration dataset for optimal results.
     """
     import torch
     import tempfile
@@ -94,6 +110,15 @@ def pipeline(model, output, quant, seed, llama_cpp, no_r2, trust_remote_code, ke
     from turbogguf.model_loader import load_model
     from turbogguf.rotation import rotate_model
     from turbogguf.export import export_rotated_model
+
+    # I-quant types that require an importance matrix
+    iq_types = {"IQ1_S", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ3_XXS", "IQ3_S", "IQ4_XS", "IQ4_NL"}
+    needs_imatrix = quant.upper() in iq_types
+
+    if needs_imatrix and not imatrix and not imatrix_file:
+        click.echo(f"Warning: {quant} benefits significantly from --imatrix. "
+                    f"Enabling imatrix generation automatically.")
+        imatrix = True
 
     llama_cpp_dir = Path(llama_cpp)
     converter = llama_cpp_dir / "convert_hf_to_gguf.py"
@@ -105,6 +130,22 @@ def pipeline(model, output, quant, seed, llama_cpp, no_r2, trust_remote_code, ke
     if not quantizer.exists():
         quantizer = llama_cpp_dir / "build" / "llama-quantize"
 
+    # Find imatrix binary if needed
+    imatrix_bin = None
+    if imatrix and not imatrix_file:
+        for candidate in [
+            llama_cpp_dir / "build" / "bin" / "llama-imatrix",
+            llama_cpp_dir / "llama-imatrix",
+            llama_cpp_dir / "build" / "llama-imatrix",
+        ]:
+            if candidate.exists():
+                imatrix_bin = candidate
+                break
+        if imatrix_bin is None:
+            click.echo("Error: llama-imatrix not found. Build llama.cpp with imatrix support,")
+            click.echo("or provide a pre-computed file with --imatrix-file.")
+            sys.exit(1)
+
     if not converter.exists():
         click.echo(f"Error: convert_hf_to_gguf.py not found at {converter}")
         sys.exit(1)
@@ -112,9 +153,13 @@ def pipeline(model, output, quant, seed, llama_cpp, no_r2, trust_remote_code, ke
         click.echo(f"Error: llama-quantize not found. Tried multiple paths in {llama_cpp_dir}")
         sys.exit(1)
 
+    total_steps = 3 + (1 if (imatrix and not imatrix_file) else 0)
+    step = 0
+
     # Step 1: Rotate
+    step += 1
     click.echo("=" * 60)
-    click.echo("STEP 1/3: Rotating model weights")
+    click.echo(f"STEP {step}/{total_steps}: Rotating model weights")
     click.echo("=" * 60)
 
     model_obj, tokenizer, handler = load_model(
@@ -137,9 +182,10 @@ def pipeline(model, output, quant, seed, llama_cpp, no_r2, trust_remote_code, ke
         torch.cuda.empty_cache()
 
     # Step 2: Convert to GGUF
+    step += 1
     click.echo()
     click.echo("=" * 60)
-    click.echo("STEP 2/3: Converting to GGUF (F16)")
+    click.echo(f"STEP {step}/{total_steps}: Converting to GGUF (F16)")
     click.echo("=" * 60)
 
     f16_gguf = str(Path(rotated_dir) / "model.gguf")
@@ -155,13 +201,50 @@ def pipeline(model, output, quant, seed, llama_cpp, no_r2, trust_remote_code, ke
         sys.exit(1)
     click.echo("GGUF conversion complete.")
 
+    # Step 2.5: Generate importance matrix (optional)
+    resolved_imatrix_file = imatrix_file
+    if imatrix and not imatrix_file:
+        step += 1
+        click.echo()
+        click.echo("=" * 60)
+        click.echo(f"STEP {step}/{total_steps}: Generating importance matrix")
+        click.echo("=" * 60)
+
+        resolved_imatrix_file = str(Path(rotated_dir) / "importance.imatrix")
+
+        cmd_imatrix = [
+            str(imatrix_bin),
+            "-m", f16_gguf,
+            "-o", resolved_imatrix_file,
+            "-ngl", "0",  # CPU mode
+        ]
+        if imatrix_dataset:
+            cmd_imatrix.extend(["-f", imatrix_dataset])
+            click.echo(f"Calibration dataset: {imatrix_dataset}")
+        else:
+            click.echo("Using built-in calibration data (for best results, provide --imatrix-dataset)")
+
+        click.echo("This may take 5-15 minutes depending on model size...")
+        result = subprocess.run(cmd_imatrix, capture_output=True, text=True, timeout=7200)
+        if result.returncode != 0:
+            click.echo(f"Warning: imatrix generation failed:\n{result.stderr}")
+            click.echo("Falling back to quantization without importance matrix.")
+            resolved_imatrix_file = None
+        else:
+            click.echo(f"Importance matrix saved to: {resolved_imatrix_file}")
+
     # Step 3: Quantize
+    step += 1
     click.echo()
     click.echo("=" * 60)
-    click.echo(f"STEP 3/3: Quantizing to {quant}")
+    imatrix_note = " + imatrix" if resolved_imatrix_file else ""
+    click.echo(f"STEP {step}/{total_steps}: Quantizing to {quant}{imatrix_note}")
     click.echo("=" * 60)
 
-    cmd_quant = [str(quantizer), f16_gguf, output, quant]
+    cmd_quant = [str(quantizer)]
+    if resolved_imatrix_file:
+        cmd_quant.extend(["--imatrix", resolved_imatrix_file])
+    cmd_quant.extend([f16_gguf, output, quant])
     result = subprocess.run(cmd_quant, capture_output=True, text=True)
     if result.returncode != 0:
         click.echo(f"Quantization failed:\n{result.stderr}")
@@ -175,7 +258,7 @@ def pipeline(model, output, quant, seed, llama_cpp, no_r2, trust_remote_code, ke
     click.echo()
     click.echo("=" * 60)
     click.echo(f"Done! Output: {output} ({output_size:.2f} GB)")
-    click.echo(f"Quant: {quant} with TurboGGUF rotation (seed={seed})")
+    click.echo(f"Quant: {quant} with TurboGGUF rotation (seed={seed}){imatrix_note}")
     click.echo("Load in LM Studio — it's a standard GGUF file.")
     click.echo("=" * 60)
 
