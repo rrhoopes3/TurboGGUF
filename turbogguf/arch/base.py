@@ -5,7 +5,7 @@ names (e.g., model.model.layers vs model.transformer.h).
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Optional
 import torch
 import torch.nn as nn
 
@@ -39,7 +39,12 @@ class ArchHandler(ABC):
 
     @abstractmethod
     def get_post_attn_norm(self, layer: nn.Module) -> nn.Module:
-        """Return the post-attention layer norm."""
+        """Return the norm between attention and MLP (pre-MLP norm).
+
+        For LLaMA this is post_attention_layernorm. For Gemma2 this is
+        pre_feedforward_layernorm. In both cases, this is the norm whose
+        output feeds into the MLP's gate/up projections.
+        """
 
     @abstractmethod
     def get_final_norm(self, model: nn.Module) -> nn.Module:
@@ -67,6 +72,20 @@ class ArchHandler(ABC):
 
     def get_post_ffn_norm(self, layer: nn.Module):
         """Return post-feedforward norm if this architecture has one (e.g., Gemma sandwich norms)."""
+        return None
+
+    def get_post_attn_output_norm(self, layer: nn.Module) -> Optional[nn.Module]:
+        """Return the post-attention output norm (applied to attn output before residual add).
+
+        Only Gemma2/4 have this. Returns None for architectures without it.
+        """
+        return None
+
+    def get_post_mlp_output_norm(self, layer: nn.Module) -> Optional[nn.Module]:
+        """Return the post-MLP output norm (applied to MLP output before residual add).
+
+        Only Gemma2/4 have this. Returns None for architectures without it.
+        """
         return None
 
     def is_linear_attention_layer(self, layer: nn.Module) -> bool:
@@ -134,6 +153,10 @@ class ArchHandler(ABC):
     def has_tied_lm_head(self, model: nn.Module) -> bool:
         """Whether lm_head weights are tied to embedding weights."""
         return False
+
+    def has_tied_embeddings(self, model: nn.Module) -> bool:
+        """Alias for has_tied_lm_head — whether embedding and lm_head share the same weight tensor."""
+        return self.has_tied_lm_head(model)
 
     def get_tied_lm_head_module(self, model: nn.Module):
         """Return the lm_head nn.Module regardless of tied-weight status.
