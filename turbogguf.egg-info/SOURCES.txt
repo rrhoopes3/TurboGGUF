@@ -20,6 +20,7 @@ turbogguf.egg-info/requires.txt
 turbogguf.egg-info/top_level.txt
 turbogguf/arch/__init__.py
 turbogguf/arch/base.py
+turbogguf/arch/gemma4.py
 turbogguf/arch/llama.py
 turbogguf/arch/mistral.py
 turbogguf/arch/qwen2.py

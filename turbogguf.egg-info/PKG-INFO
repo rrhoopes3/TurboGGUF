@@ -137,6 +137,7 @@ GPU not required — rotation is pure matrix math on CPU.
 | LLaMA | Supported | Llama 2, Llama 3, Llama 3.1, CodeLlama |
 | Mistral | Supported | Mistral 7B, Mixtral (dense layers) |
 | Qwen2 | Supported | Qwen2, Qwen2.5 |
+| Gemma 4 | Supported | Gemma 4 31B (dense), Gemma 4 multimodal |
 
 ## How It Works (Technical)
 

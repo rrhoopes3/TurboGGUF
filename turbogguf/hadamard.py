@@ -118,17 +118,51 @@ def hadamard_matrix(n: int) -> torch.Tensor:
     return H.clone()
 
 
+def _random_orthogonal_matrix(
+    size: int,
+    seed: int = 42,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Generate a random orthogonal matrix via QR decomposition.
+
+    Fallback for dimensions where Hadamard construction is impossible
+    (e.g., 5376 = 21 * 256, and no Hadamard matrix exists for size 21).
+    Same guarantees: orthogonal, deterministic from seed.
+
+    Args:
+        size: Matrix dimension
+        seed: Random seed
+        dtype: Target dtype
+
+    Returns:
+        size x size orthogonal matrix Q with Q @ Q^T = I
+    """
+    gen = torch.Generator()
+    gen.manual_seed(seed)
+    # Random Gaussian matrix -> QR decomposition gives orthogonal Q
+    A = torch.randn(size, size, generator=gen, dtype=dtype)
+    Q, R = torch.linalg.qr(A)
+    # Ensure deterministic sign (Q from QR has arbitrary column signs)
+    # Fix by making diagonal of R positive
+    signs = torch.sign(torch.diag(R))
+    signs[signs == 0] = 1
+    Q = Q * signs.unsqueeze(0)
+    return Q
+
+
 def random_hadamard_matrix(
     size: int,
     seed: int = 42,
     device: Optional[torch.device] = None,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """Generate a randomized orthogonal Hadamard matrix.
+    """Generate a randomized orthogonal matrix.
 
-    Constructs H_n / sqrt(n), then multiplies by a random diagonal of ±1
-    entries (seeded for reproducibility). The result is an orthogonal matrix
-    Q satisfying Q @ Q^T = I.
+    Uses fast Hadamard construction when possible (n = k * 2^m with known k),
+    falls back to QR-based random orthogonal matrix for other dimensions
+    (e.g., Gemma 4's hidden_size=5376).
+
+    The result is always an orthogonal matrix Q satisfying Q @ Q^T = I.
 
     Args:
         size: Matrix dimension
@@ -139,15 +173,19 @@ def random_hadamard_matrix(
     Returns:
         size x size orthogonal matrix
     """
-    H = hadamard_matrix(size).to(dtype=dtype)
-
-    # Random ±1 diagonal (seeded)
-    gen = torch.Generator()
-    gen.manual_seed(seed)
-    signs = torch.randint(0, 2, (size,), generator=gen).to(dtype) * 2 - 1
-
-    # Q = D @ H / sqrt(n) where D = diag(signs)
-    Q = (signs.unsqueeze(1) * H) / math.sqrt(size)
+    try:
+        H = hadamard_matrix(size).to(dtype=dtype)
+        # Random ±1 diagonal (seeded)
+        gen = torch.Generator()
+        gen.manual_seed(seed)
+        signs = torch.randint(0, 2, (size,), generator=gen).to(dtype) * 2 - 1
+        # Q = D @ H / sqrt(n) where D = diag(signs)
+        Q = (signs.unsqueeze(1) * H) / math.sqrt(size)
+    except ValueError:
+        # Hadamard construction not possible for this dimension
+        print(f"  Note: Using QR-based orthogonal matrix for dim={size} "
+              f"(no Hadamard factorization available)")
+        Q = _random_orthogonal_matrix(size, seed=seed, dtype=dtype)
 
     if device is not None:
         Q = Q.to(device)

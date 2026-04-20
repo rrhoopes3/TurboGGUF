@@ -1,8 +1,8 @@
 # TurboGGUF
 
-**Rotation-aware GGUF quantizer: Q2 quality that performs like Q4.**
+> **Status: shelved.** The underlying math (QuaRot-style Hadamard rotation) is sound and is published research. This repo now has a working fix for Qwen-family `v_proj.bias` rotation and a bf16-equivalence test on Qwen2.5-3B. Remaining bugs (bf16 precision drift on pure-LLaMA architectures, no forward-equivalence gate in the pipeline) prevent claiming any universal Q2/Q3 win. See [Status](#status) below.
 
-Applies TurboQuant/QuaRot-style Hadamard rotation to LLM weights before GGUF quantization. The rotation eliminates outlier features in weight matrices, making low-bit quantization (Q2_K, Q3_K) dramatically more effective. No llama.cpp patching required.
+Applies TurboQuant/QuaRot-style Hadamard rotation to LLM weights before GGUF quantization. The rotation eliminates outlier features in weight matrices, making low-bit quantization (Q2_K, Q3_K) more effective on architectures where it works. No llama.cpp patching required.
 
 ```
                     ┌──────────────────────────────────┐
@@ -45,16 +45,52 @@ Hadamard rotation spreads these outliers uniformly across all dimensions. After 
 
 The math: RMSNorm is rotation-invariant (`||Rx|| = ||x||`), so the same rotation matrix R can be fused into adjacent weight matrices. At each layer boundary `R^T @ R = I`. The rotated model produces **bit-identical FP16 outputs**.
 
-## Expected Quality Gains
+## Measured Results
 
-| Model | Quant | Rotated? | Size | Expected PPL |
-|-------|-------|----------|------|-------------|
-| Llama-3.1-8B | Q4_K_M | No | ~4.9 GB | ~6.5 (target) |
-| Llama-3.1-8B | Q2_K | No | ~3.0 GB | ~8.5 |
-| Llama-3.1-8B | Q2_K | **Yes** | ~3.0 GB | **~6.8-7.2** |
-| Llama-3.1-8B | Q3_K_S | **Yes** | ~3.5 GB | **~6.3-6.5** |
+### Qwen2.5-3B (pure transformer, after `v_proj.bias` fix)
 
-**Rotated Q3_K_S ≈ unrotated Q4_K_M quality at 30% less VRAM.**
+wiki.test.raw, `n_ctx=512`, llama.cpp b8638, RTX 3090 24 GB.
+
+| Build | PPL | ± | Size |
+|-------|-----|---|------|
+| Stock bf16 (baseline) | 8.4230 | 0.0566 | 5.8 GB |
+| TurboGGUF bf16 | 8.4217 | 0.0566 | 6.4 GB |
+| Stock Q6_K | 8.4807 | 0.0572 | 2.4 GB |
+| TurboGGUF Q6_K | 8.4652 | 0.0569 | 2.7 GB |
+| Stock Q4_K_M | 8.8059 | 0.0596 | 1.8 GB |
+| TurboGGUF Q4_K_M | 8.8420 | 0.0594 | 2.0 GB |
+| Stock Q3_K_M | 14.3488 | 0.1033 | 1.5 GB |
+| **TurboGGUF Q3_K_M** | **10.0950** | 0.0690 | 1.7 GB |
+| Stock Q2_K | 21,636 | 207 | 1.2 GB |
+| **TurboGGUF Q2_K** | **26.70** | 0.207 | 1.3 GB |
+
+**Findings:**
+
+- **bf16 equivalence confirmed** (turbo 8.4217 vs stock 8.4230, within ±0.06 noise): the rotation pipeline is mathematically correct on Qwen2 after the `v_proj.bias` fix.
+- **Q6 and Q4 are neutral:** deltas fall inside the error bars, which is expected — at 4+ bits the quantizer has enough levels that outliers aren't destructive.
+- **Q3 is a real win:** rotated 10.10 vs stock 14.35 PPL (−30%). But stock Q4 (8.81) still beats rotated Q3 at similar size, so "rotated Q3 ≈ stock Q4" does not hold on this model.
+- **Q2 rescue is dramatic but not practically useful:** stock Q2 is catastrophic (21,636 PPL), rotated Q2 is 26.70 — usable in the sense of not-completely-broken, but still worse than stock Q3 (14.35) at similar file size.
+
+### Qwen3.6-35B-A3B (hybrid Mamba + attention MoE) — pre-fix data, indicative only
+
+These numbers were collected before the `v_proj.bias` fix and without a forward-equivalence gate in the pipeline. Treat as suggestive, not validated.
+
+| Build | PPL | ± | Size |
+|-------|-----|---|------|
+| Stock Q6_K | 6.7305 | 0.0438 | 28.5 GB |
+| Stock Q4_K_M | 6.8216 | 0.0445 | 21.2 GB |
+| TurboGGUF Q6_K | 6.7553 | 0.0440 | 28.5 GB |
+| TurboGGUF Q3_K_M | 7.2943 | 0.0485 | 16.7 GB |
+
+`qwen35moe` has `full_attention_interval=4`: only 10 of 40 layers are classical attention. The remaining 30 are SSM layers that the standard Q/K/V/O + gate/up/down rotation recipe doesn't touch. Benefit ceiling on this architecture is inherently limited regardless of other fixes.
+
+## Status
+
+Shelved pending the following fixes:
+
+1. **bf16/fp16 precision drift on pure-LLaMA/Yi architectures.** Yi-1.5-9B bf16 turbo PPL drifts to 8.42 vs stock 5.76 even with R1 alone. Not a rotation-math bug — looks like bf16→fp32→bf16 round-trip accumulation in the rotation path. Needs fp32 accumulation throughout, or at minimum a gate that refuses to save when forward logits diverge past a threshold.
+2. **No forward-equivalence gate in the pipeline.** When rotation produces mathematically wrong weights, the pipeline currently saves them silently. A gate comparing original-model logits vs rotated-model logits on a fixed probe batch would catch catastrophic bugs (like the pre-fix `v_proj.bias` bug) at rotation time instead of via downstream perplexity runs.
+3. **Headline claim not independently validated.** "Q2 quality that performs like Q4" comes from the QuaRot paper on Llama-3.1-8B (INT4). On Qwen2.5-3B (this repo's first architecture fully validated at bf16), rotated Q3 beats stock Q3 but does not match stock Q4. Claim should be either re-measured on Llama-3.1-8B directly with this implementation, or dropped.
 
 ## Quick Start
 
@@ -105,12 +141,13 @@ GPU not required — rotation is pure matrix math on CPU.
 
 ## Architecture Support
 
-| Architecture | Status | Models |
-|-------------|--------|--------|
-| LLaMA | Supported | Llama 2, Llama 3, Llama 3.1, CodeLlama |
-| Mistral | Supported | Mistral 7B, Mixtral (dense layers) |
-| Qwen2 | Supported | Qwen2, Qwen2.5 |
-| Gemma 4 | Supported | Gemma 4 31B (dense), Gemma 4 multimodal |
+| Architecture | Status | Notes |
+|---|---|---|
+| Qwen2 / Qwen2.5 | Validated at bf16 (Qwen2.5-3B) | `v_proj.bias` rotation fixed; Q3 improves over stock Q3, Q2 still not viable |
+| LLaMA / Yi | Pipeline runs, correctness not confirmed | bf16 forward drift observed on Yi-1.5-9B — see Status |
+| Mistral | Pipeline runs, not re-validated post-fix | |
+| Gemma 4 | Pipeline runs end-to-end, correctness not verified | |
+| Qwen3 hybrid (SSM+attention MoE) | Partial by design | Only ~25% of layers are attention; rotation cannot reach SSM layers |
 
 ## How It Works (Technical)
 

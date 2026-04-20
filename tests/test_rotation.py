@@ -226,6 +226,33 @@ class TestHeadRotation:
         assert v_proj.weight.shape == (num_kv_heads * head_dim, 64)
         assert o_proj.weight.shape == (64, num_heads * head_dim)
 
+    def test_v_bias_rotates_with_r2(self):
+        """R2 must rotate v_proj bias head-by-head for Qwen-style attention."""
+        head_dim = 8
+        num_heads = 2
+        hidden = num_heads * head_dim
+
+        q_proj = nn.Linear(hidden, hidden, bias=False)
+        k_proj = nn.Linear(hidden, hidden, bias=False)
+        v_proj = nn.Linear(hidden, hidden, bias=True)
+        o_proj = nn.Linear(hidden, hidden, bias=False)
+        x = torch.randn(2, 5, hidden)
+
+        def attend():
+            q = q_proj(x).view(2, 5, num_heads, head_dim).transpose(1, 2)
+            k = k_proj(x).view(2, 5, num_heads, head_dim).transpose(1, 2)
+            v = v_proj(x).view(2, 5, num_heads, head_dim).transpose(1, 2)
+            scores = (q @ k.transpose(-2, -1)) / math.sqrt(head_dim)
+            probs = torch.softmax(scores, dim=-1)
+            out = (probs @ v).transpose(1, 2).contiguous().view(2, 5, hidden)
+            return o_proj(out)
+
+        before = attend()
+        rotate_head_weights(v_proj, o_proj, head_dim, num_heads, num_heads, seed=42)
+        after = attend()
+
+        assert torch.allclose(before, after, atol=1e-4)
+
 
 class TestWeightDistribution:
     """Test that rotation improves weight distribution for quantization."""

@@ -12,6 +12,10 @@ Key differences from LLaMA:
   - Sandwich norms: optional pre/post feedforward norms per layer
   - Tied lm_head: embedding weights may be shared with output projection
   - Hybrid attention: sliding window + full attention (transparent to rotation)
+
+Note: Gemma4RMSNorm.forward does `output * weight` (plain weight, init=1.0),
+NOT `output * (1 + weight)`. That 1+weight pattern is Gemma 3 only. The base
+class extract_norm_gamma / reset_norm_to_identity are correct as-is.
 """
 
 from typing import Dict, Optional
@@ -23,15 +27,26 @@ class Gemma4Handler(LlamaHandler):
     """Handler for Gemma 4 models (including multimodal wrapper)."""
 
     def _get_text_model(self, model: nn.Module) -> nn.Module:
-        """Navigate to the inner text decoder.
+        """Navigate to the inner Gemma4TextModel.
 
-        Handles both:
-          - Gemma4ForConditionalGeneration (has .language_model)
-          - Gemma4ForCausalLM (is the text model directly)
+        Structure varies by loading method:
+          - Gemma4ForConditionalGeneration: model.model.language_model
+          - Gemma4ForCausalLM: model.model
+          - Direct Gemma4TextModel: model itself
         """
-        if hasattr(model, "language_model"):
-            return model.language_model
-        return model
+        # ConditionalGeneration: model -> Gemma4Model -> language_model
+        if hasattr(model, "model") and hasattr(model.model, "language_model"):
+            return model.model.language_model
+        # CausalLM or direct: model -> Gemma4TextModel (has .layers)
+        if hasattr(model, "model") and hasattr(model.model, "layers"):
+            return model.model
+        # Already the text model
+        if hasattr(model, "layers"):
+            return model
+        raise AttributeError(
+            f"Cannot find Gemma4TextModel in {type(model).__name__}. "
+            f"Children: {[n for n, _ in model.named_children()]}"
+        )
 
     def _get_config(self, model: nn.Module):
         """Get the text model config, handling nested configs."""
@@ -43,24 +58,23 @@ class Gemma4Handler(LlamaHandler):
         return config
 
     def get_embedding(self, model: nn.Module) -> nn.Embedding:
-        return self._get_text_model(model).model.embed_tokens
+        return self._get_text_model(model).embed_tokens
 
     def get_lm_head(self, model: nn.Module) -> Optional[nn.Linear]:
-        text = self._get_text_model(model)
-        head = getattr(text, "lm_head", None)
+        head = self.get_tied_lm_head_module(model)
         if head is None:
             return None
         # Check for tied weights (shared with embedding)
-        emb = text.model.embed_tokens
+        emb = self._get_text_model(model).embed_tokens
         if head.weight.data_ptr() == emb.weight.data_ptr():
             return None
         return head
 
     def get_layers(self, model: nn.Module) -> nn.ModuleList:
-        return self._get_text_model(model).model.layers
+        return self._get_text_model(model).layers
 
     def get_final_norm(self, model: nn.Module) -> nn.Module:
-        return self._get_text_model(model).model.norm
+        return self._get_text_model(model).norm
 
     def get_pre_ffn_norm(self, layer: nn.Module):
         """Return pre-feedforward norm (Gemma sandwich norm pattern)."""
@@ -89,9 +103,30 @@ class Gemma4Handler(LlamaHandler):
         return self._get_config(model).hidden_size
 
     def has_tied_lm_head(self, model: nn.Module) -> bool:
+        head = self.get_tied_lm_head_module(model)
+        if head is None:
+            return True
+        emb = self._get_text_model(model).embed_tokens
+        return head.weight.data_ptr() == emb.weight.data_ptr()
+
+    def get_tied_lm_head_module(self, model: nn.Module):
+        # For Gemma4ForConditionalGeneration, lm_head is not a top-level
+        # attribute — it lives inside the text model (model.model.language_model).
+        # Fall back to the outer model if the text model doesn't have one.
         text = self._get_text_model(model)
         head = getattr(text, "lm_head", None)
         if head is None:
-            return True
-        emb = text.model.embed_tokens
-        return head.weight.data_ptr() == emb.weight.data_ptr()
+            head = getattr(model, "lm_head", None)
+        return head
+
+    def uses_tied_lm_head_for_gguf(self) -> bool:
+        # Gemma4 requires a SEPARATE output.weight for correct logit computation.
+        # The output_norm has large learned gamma values (up to ~510x) that must
+        # be fused into lm_head BEFORE rotation; otherwise gamma doesn't commute
+        # with the Hadamard rotation and output logits are completely wrong.
+        #
+        # The pre-built llama.cpp binary (≤b8638) looks for tensor named "output"
+        # (not "output.weight") for Gemma4 due to a missing LLM_TENSOR_OUTPUT entry
+        # in the Gemma4 arch tensor list.  The pipeline post-processes the GGUF to
+        # rename "output.weight" → "output" for compatibility.  See cli.py pipeline.
+        return False

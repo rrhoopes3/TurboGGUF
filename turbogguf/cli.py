@@ -35,7 +35,70 @@ def _parse_max_memory(max_memory_str):
     if not max_memory_str:
         return None
     import json
-    return json.loads(max_memory_str)
+    raw = json.loads(max_memory_str)
+    # accelerate expects integer keys for GPUs, not strings like "0" or "cuda:0"
+    parsed = {}
+    for k, v in raw.items():
+        if k == "cpu" or k == "disk":
+            parsed[k] = v
+        else:
+            # "0", "cuda:0", "1", "cuda:1" etc. -> int
+            parsed[int(k.replace("cuda:", ""))] = v
+    return parsed
+
+
+def _find_llama_cpp_tools(llama_cpp: str | Path) -> tuple[Path, Path]:
+    """Find a matched converter + quantizer from one llama.cpp tree.
+
+    Mixing a newer `convert_hf_to_gguf.py` from a source checkout with older
+    binaries from a different build can silently produce broken GGUF files.
+    Gemma 4 is especially sensitive because the tensor schema is still moving.
+    This helper keeps the converter and quantizer on the same tree.
+    """
+    llama_cpp_dir = Path(llama_cpp)
+
+    converter = None
+    for candidate in [
+        llama_cpp_dir / "convert_hf_to_gguf.py",
+        llama_cpp_dir / "repo" / "convert_hf_to_gguf.py",
+    ]:
+        if candidate.exists():
+            converter = candidate
+            break
+
+    if converter is None:
+        raise FileNotFoundError(
+            f"convert_hf_to_gguf.py not found in {llama_cpp_dir}"
+        )
+
+    tool_root = converter.parent
+    exe = "llama-quantize.exe" if sys.platform == "win32" else "llama-quantize"
+    quantizer_candidates = [
+        tool_root / "build" / "bin" / exe,
+        tool_root / "bin" / exe,
+        tool_root / exe,
+        tool_root / "build" / exe,
+    ]
+
+    # Also check the parent llama_cpp_dir's bin/ when the converter lives in a
+    # subdirectory (e.g. converter in repo/, binaries in bin/).  This is the
+    # standard layout when you keep a source checkout alongside pre-built
+    # release binaries under one root directory.
+    if tool_root != llama_cpp_dir:
+        quantizer_candidates.extend([
+            llama_cpp_dir / "bin" / exe,
+            llama_cpp_dir / "build" / "bin" / exe,
+            llama_cpp_dir / exe,
+        ])
+
+    quantizer = next((p for p in quantizer_candidates if p.exists()), None)
+    if quantizer is None:
+        searched = ", ".join(str(p) for p in quantizer_candidates)
+        raise FileNotFoundError(
+            f"{exe} not found under {llama_cpp_dir}.\nSearched: {searched}"
+        )
+
+    return converter, quantizer
 
 
 @cli.command()
@@ -103,9 +166,11 @@ def rotate(model, output, seed, no_r2, dtype, device_map, max_memory, trust_remo
 @click.option("--no-r2", is_flag=True, help="Skip per-head R2 rotation")
 @click.option("--device-map", default="cpu", help="Device map: 'cpu', 'auto', or 'cuda:0'")
 @click.option("--max-memory", default=None, help='Max memory JSON, e.g. \'{"cpu": "50GB", "cuda:0": "22GB"}\'')
+@click.option("--dtype", default="float16", type=click.Choice(["float16", "bfloat16"]),
+              help="Load dtype. Use bfloat16 for models stored as bf16 to avoid doubling RAM during conversion.")
 @click.option("--trust-remote-code", is_flag=True, help="Trust remote code")
 @click.option("--keep-intermediate", is_flag=True, help="Keep intermediate files")
-def pipeline(model, output, quant, seed, llama_cpp, no_r2, device_map, max_memory, trust_remote_code, keep_intermediate):
+def pipeline(model, output, quant, seed, llama_cpp, no_r2, device_map, max_memory, dtype, trust_remote_code, keep_intermediate):
     """Full pipeline: rotate -> convert to GGUF -> quantize.
 
     One command to go from HuggingFace model to quantized GGUF.
@@ -119,36 +184,14 @@ def pipeline(model, output, quant, seed, llama_cpp, no_r2, device_map, max_memor
 
     mem = _parse_max_memory(max_memory)
 
-    llama_cpp_dir = Path(llama_cpp)
-
-    # Find converter script (Python)
-    converter = None
-    for candidate in [
-        llama_cpp_dir / "convert_hf_to_gguf.py",
-        llama_cpp_dir / "repo" / "convert_hf_to_gguf.py",
-    ]:
-        if candidate.exists():
-            converter = candidate
-            break
-    if converter is None:
-        click.echo(f"Error: convert_hf_to_gguf.py not found in {llama_cpp_dir}")
+    try:
+        converter, quantizer = _find_llama_cpp_tools(llama_cpp)
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}")
         sys.exit(1)
 
-    # Find quantizer binary
-    quantizer = None
-    exe = "llama-quantize.exe" if sys.platform == "win32" else "llama-quantize"
-    for candidate in [
-        llama_cpp_dir / "build" / "bin" / exe,
-        llama_cpp_dir / "bin" / exe,
-        llama_cpp_dir / exe,
-        llama_cpp_dir / "build" / exe,
-    ]:
-        if candidate.exists():
-            quantizer = candidate
-            break
-    if quantizer is None:
-        click.echo(f"Error: {exe} not found. Searched build/bin/, bin/, and root of {llama_cpp_dir}")
-        sys.exit(1)
+    click.echo(f"Using converter: {converter}")
+    click.echo(f"Using quantizer: {quantizer}")
 
     # Step 1: Rotate
     click.echo("=" * 60)
@@ -157,8 +200,9 @@ def pipeline(model, output, quant, seed, llama_cpp, no_r2, device_map, max_memor
     if mem:
         click.echo(f"Memory map: {mem}")
 
+    dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16}
     model_obj, tokenizer, handler = load_model(
-        model, dtype=torch.float16, device_map=device_map, max_memory=mem,
+        model, dtype=dtype_map[dtype], device_map=device_map, max_memory=mem,
         trust_remote_code=trust_remote_code,
     )
     metadata = rotate_model(model_obj, handler=handler, seed=seed, apply_r2=not no_r2)
@@ -195,6 +239,15 @@ def pipeline(model, output, quant, seed, llama_cpp, no_r2, device_map, max_memor
         click.echo(f"Conversion failed:\n{result.stderr}")
         sys.exit(1)
     click.echo("GGUF conversion complete.")
+
+    # Step 2b: Post-process GGUF for Gemma4 binary compatibility.
+    # Pre-built llama.cpp ≤b8638 looks for tensor "output" (no .weight suffix)
+    # for Gemma4. Rename it so the pre-built quantizer and inference binary can
+    # load the GGUF without rebuilding llama.cpp.
+    from turbogguf.export import patch_gguf_output_tensor
+    patched = patch_gguf_output_tensor(f16_gguf)
+    if patched:
+        click.echo("  (output tensor renamed for pre-built llama.cpp compatibility)")
 
     # Step 3: Quantize
     click.echo()
