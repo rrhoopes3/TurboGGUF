@@ -95,6 +95,41 @@ def _run_equivalence_gate(
     return report
 
 
+def _upcast_for_gate(model, rotation_precision: str) -> dict:
+    """Upcast model to fp32 when rotation_precision=='fp32' and model isn't already fp32.
+
+    Returns the original dtype map (non-empty means caller must restore after gate).
+    When the model is already fp32 or rotation_precision!='fp32', returns {}.
+
+    By upcasting before reference capture and restoring only after the gate runs,
+    both the pre- and post-rotation measurements are taken in fp32.  This keeps
+    max_abs_diff well inside 1e-4 rather than reflecting fp16 quantisation noise.
+    """
+    import torch
+    from turbogguf.rotation import _collect_param_dtypes, _cast_all_params
+
+    sample = next(model.parameters())
+    if rotation_precision != "fp32" or sample.dtype == torch.float32:
+        return {}
+
+    original_dtypes = _collect_param_dtypes(model)
+    n = _cast_all_params(model, torch.float32)
+    click.echo(
+        f"Upcasting {n} param(s) to fp32 for reference capture + gate "
+        "(both measurements in fp32 keeps max_abs_diff < 1e-4)..."
+    )
+    return original_dtypes
+
+
+def _downcast_after_gate(model, original_dtypes: dict, storage_dtype_str: str) -> None:
+    """Restore the dtypes saved by _upcast_for_gate."""
+    if not original_dtypes:
+        return
+    from turbogguf.rotation import _restore_param_dtypes
+    n = _restore_param_dtypes(model, original_dtypes)
+    click.echo(f"Downcasting {n} param(s) back to {storage_dtype_str} for save...")
+
+
 @click.group()
 @click.version_option(version="0.1.0")
 def cli():
@@ -251,6 +286,15 @@ def rotate(
         trust_remote_code=trust_remote_code,
     )
 
+    # Record storage dtype now, before any upcast, so metadata reflects save dtype.
+    storage_dtype_str = str(next(model_obj.parameters()).dtype).removeprefix("torch.")
+
+    # Upcast to fp32 before reference capture so both measurements are in fp32.
+    # rotate_model will see the model already in fp32 and skip its internal upcast.
+    cli_original_dtypes = {}
+    if not no_equivalence_gate:
+        cli_original_dtypes = _upcast_for_gate(model_obj, rotation_precision)
+
     references = None
     prompts: list[str] = []
     if not no_equivalence_gate:
@@ -268,6 +312,8 @@ def rotate(
         apply_r2=not no_r2,
         rotation_precision=rotation_precision,
     )
+    if cli_original_dtypes:
+        metadata["storage_dtype"] = storage_dtype_str
 
     output_path = Path(output)
     if not audit_only:
@@ -289,6 +335,7 @@ def rotate(
         else:
             click.echo("Equivalence gate skipped (--no-equivalence-gate).")
     except EquivalenceFailure as e:
+        _downcast_after_gate(model_obj, cli_original_dtypes, storage_dtype_str)
         if not audit_only:
             metadata["equivalence"] = e.report.to_dict()
             (output_path / "rotation_manifest.json").write_text(
@@ -296,6 +343,9 @@ def rotate(
             )
         click.echo(f"Aborting (--strict): {e}")
         sys.exit(1)
+
+    # Downcast after gate so the gate ran in fp32, save is in original dtype.
+    _downcast_after_gate(model_obj, cli_original_dtypes, storage_dtype_str)
 
     if audit_only:
         click.echo("Audit-only mode: skipping save.")
@@ -385,6 +435,12 @@ def pipeline(
         trust_remote_code=trust_remote_code,
     )
 
+    storage_dtype_str = str(next(model_obj.parameters()).dtype).removeprefix("torch.")
+
+    cli_original_dtypes = {}
+    if not no_equivalence_gate:
+        cli_original_dtypes = _upcast_for_gate(model_obj, rotation_precision)
+
     references = None
     prompts: list[str] = []
     if not no_equivalence_gate:
@@ -402,6 +458,8 @@ def pipeline(
         apply_r2=not no_r2,
         rotation_precision=rotation_precision,
     )
+    if cli_original_dtypes:
+        metadata["storage_dtype"] = storage_dtype_str
 
     if not no_equivalence_gate:
         try:
@@ -416,9 +474,13 @@ def pipeline(
             )
             metadata["equivalence"] = report.to_dict()
         except EquivalenceFailure as e:
+            _downcast_after_gate(model_obj, cli_original_dtypes, storage_dtype_str)
             metadata["equivalence"] = e.report.to_dict()
             click.echo(f"Aborting (--strict): {e}")
             sys.exit(1)
+
+    # Downcast after gate so gate ran in fp32; model saved in original dtype.
+    _downcast_after_gate(model_obj, cli_original_dtypes, storage_dtype_str)
 
     if keep_intermediate:
         rotated_dir = str(Path(output).parent / "rotated_intermediate")
