@@ -50,7 +50,6 @@ def evaluate_gguf(
     cmd = [
         llama_perplexity_bin,
         "-m", gguf_path,
-        "--perplexity",
         "-c", str(context_size),
         "-ngl", str(n_gpu_layers),
     ]

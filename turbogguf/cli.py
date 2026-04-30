@@ -221,19 +221,26 @@ def _find_llama_cpp_tools(llama_cpp: str | Path) -> tuple[Path, Path]:
     ]
 
     quantizer = next((p for p in quantizer_candidates if p.exists()), None)
+    if quantizer is None and tool_root != llama_cpp_dir:
+        # Common dev layout: source checkout in repo/, pre-built binaries
+        # alongside it in bin/.  We warn (in case the binaries are from a
+        # different release than the source) but don't refuse.
+        parent_candidates = [
+            llama_cpp_dir / "bin" / exe,
+            llama_cpp_dir / "build" / "bin" / exe,
+            llama_cpp_dir / exe,
+        ]
+        parent_quantizer = next((p for p in parent_candidates if p.exists()), None)
+        if parent_quantizer is not None:
+            click.echo(
+                f"Note: converter is under {tool_root} but quantizer is under "
+                f"{parent_quantizer.parent}.  If the binaries are from a different "
+                "llama.cpp release than the source checkout, conversion may produce "
+                "GGUFs the quantizer can't load."
+            )
+            quantizer = parent_quantizer
+
     if quantizer is None:
-        if tool_root != llama_cpp_dir:
-            parent_candidates = [
-                llama_cpp_dir / "bin" / exe,
-                llama_cpp_dir / "build" / "bin" / exe,
-                llama_cpp_dir / exe,
-            ]
-            parent_quantizer = next((p for p in parent_candidates if p.exists()), None)
-            if parent_quantizer is not None:
-                raise FileNotFoundError(
-                    "Refusing to mix converter and binaries from different llama.cpp trees. "
-                    f"Converter is under {tool_root}, but quantizer is under {parent_quantizer.parent}."
-                )
         searched = ", ".join(str(p) for p in quantizer_candidates)
         raise FileNotFoundError(
             f"{exe} not found under {llama_cpp_dir}.\nSearched: {searched}"
