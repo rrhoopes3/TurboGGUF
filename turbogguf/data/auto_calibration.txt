@@ -1,0 +1,498 @@
+CHAPTER I. Down the Rabbit-Hole
+
+Alice was beginning to get very tired of sitting by her sister on the bank, and
+of having nothing to do: once or twice she had peeped into the book her sister
+was reading, but it had no pictures or conversations in it, "and what is the use
+of a book," thought Alice, "without pictures or conversations?"
+
+So she was considering in her own mind, as well as she could, for the hot day
+made her feel very sleepy and stupid, whether the pleasure of making a
+daisy-chain would be worth the trouble of getting up and picking the daisies,
+when suddenly a White Rabbit with pink eyes ran close by her.
+
+There was nothing so very remarkable in that; nor did Alice think it so very much
+out of the way to hear the Rabbit say to itself, "Oh dear! Oh dear! I shall be
+too late!" But when the Rabbit actually took a watch out of its waistcoat-pocket,
+and looked at it, and then hurried on, Alice started to her feet, for it flashed
+across her mind that she had never before seen a rabbit with either a
+waistcoat-pocket, or a watch to take out of it.
+
+In another moment down went Alice after it, never once considering how in the
+world she was to get out again. The rabbit-hole went straight on like a tunnel
+for some way, and then dipped suddenly down, so suddenly that Alice had not a
+moment to think about stopping herself before she found herself falling down a
+very deep well.
+
+Either the well was very deep, or she fell very slowly, for she had plenty of
+time as she went down to look about her and to wonder what was going to happen
+next. First, she tried to look down and make out what she was coming to, but it
+was too dark to see anything; then she looked at the sides of the well, and
+noticed that they were filled with cupboards and book-shelves; here and there she
+saw maps and pictures hung upon pegs.
+
+CHAPTER II. The Pool of Tears
+
+"Curiouser and curiouser!" cried Alice. She was so much surprised that for the
+moment she quite forgot how to speak good English. "Now I am opening out like the
+largest telescope that ever was! Good-bye, feet!" For when she looked down at her
+feet, they seemed to be almost out of sight, they were getting so far off.
+
+Poor Alice! It was as much as she could do, lying down on one side, to look
+through into the garden with one eye; but to get through was more hopeless than
+ever. She sat down and began to cry again.
+
+"You ought to be ashamed of yourself," said Alice, "a great girl like you," she
+might well say this, "to go on crying in this way! Stop this moment, I tell you!"
+But she went on all the same, shedding gallons of tears, until there was a large
+pool all round her, about four inches deep and reaching half down the hall.
+
+After a time she heard a little pattering of feet in the distance, and she
+hastily dried her eyes to see what was coming. It was the White Rabbit returning,
+splendidly dressed, with a pair of white kid gloves in one hand and a large fan
+in the other. He came trotting along in a great hurry, muttering to himself as he
+came, "Oh! the Duchess, the Duchess! Oh! won't she be savage if I've kept her
+waiting!"
+
+Alice felt so desperate that she was ready to ask help of any one; so, when the
+Rabbit came near her, she began, in a low, timid voice, "If you please, sir--"
+The Rabbit started violently, dropped the white kid gloves and the fan, and
+skurried away into the darkness as hard as he could go.
+
+EXTRACT FROM THE GETTYSBURG ADDRESS
+
+Four score and seven years ago our fathers brought forth on this continent, a
+new nation, conceived in Liberty, and dedicated to the proposition that all men
+are created equal.
+
+Now we are engaged in a great civil war, testing whether that nation, or any
+nation so conceived and so dedicated, can long endure. We are met on a great
+battle-field of that war. We have come to dedicate a portion of that field, as a
+final resting place for those who here gave their lives that that nation might
+live. It is altogether fitting and proper that we should do this.
+
+But, in a larger sense, we can not dedicate, we can not consecrate, we can not
+hallow this ground. The brave men, living and dead, who struggled here, have
+consecrated it, far above our poor power to add or detract. The world will little
+note, nor long remember what we say here, but it can never forget what they did
+here. It is for us the living, rather, to be dedicated here to the unfinished
+work which they who fought here have thus far so nobly advanced.
+
+NOTES ON PRACTICAL COMPUTATION
+
+Suppose a small workshop keeps a ledger of orders, shipments, repairs, and
+payments. A useful daily report should answer simple questions first: which
+orders are late, which parts are scarce, which invoices are unpaid, and which
+machines need service before the end of the week. The report should not hide the
+important facts behind decorative language. It should name the customer, the
+date, the part number, the expected quantity, and the person responsible for the
+next action.
+
+For example, if ten brass fittings are required for an assembly and only six are
+available, the shortage is four. If the supplier can deliver eight more fittings
+on Thursday, the assembly may proceed on Friday provided the inspection station
+has capacity. If inspection is already booked for another job, the plan must
+change. A good system records these dependencies explicitly, because a schedule
+that ignores constraints is only a wish written in columns.
+
+Here is a small Python function used in such a report:
+
+def shortage(required, available):
+    if required <= available:
+        return 0
+    return required - available
+
+The function is intentionally plain. It handles the normal case, returns a
+number that can be sorted or summed, and does not perform hidden I/O. Larger
+programs benefit from the same habit: keep transformations predictable, give
+names to intermediate results, and test the boundary cases before trusting the
+output.
+
+CALIBRATION RECORD: CIVIC PLANNING
+
+At the beginning of spring the town engineer prepared a maintenance schedule for
+bridges, culverts, footpaths, lamps, and public wells. The council asked for a
+plan that could be read by clerks as well as surveyors, so each item was written
+with a location, an inspection date, a material estimate, and a short reason for
+the work. A bridge with loose planks received a higher priority than a railing
+that merely needed paint. A blocked drain near the market received a higher
+priority than a ditch at the edge of a field, because a single storm could turn
+the market road into a pool before sunrise.
+
+The engineer did not try to repair everything at once. She divided the work into
+routes, then matched each route with a crew and a cart. The western route needed
+stone, lime, rope, and two long beams. The northern route needed lamp glass,
+hinges, and a ladder. The southern route needed shovels and three days of dry
+weather. By keeping those facts separate, the office could change one route
+without confusing the others. If the stone was late, the lamp repairs could still
+begin. If rain delayed the ditch work, the bridge crew did not have to wait.
+
+This kind of plan is a small example of dependency management. The order of work
+matters because materials, people, tools, and weather are limited. A clear list
+does not remove scarcity, but it makes scarcity visible. When constraints are
+visible, a planner can choose among real alternatives instead of guessing.
+
+CALIBRATION RECORD: MATHEMATICS
+
+Consider a rectangle with width twelve meters and length eighteen meters. Its
+area is two hundred sixteen square meters. If a path two meters wide is placed
+around the outside, the new width is sixteen meters and the new length is
+twenty-two meters. The area including the path is three hundred fifty-two square
+meters, so the path itself covers one hundred thirty-six square meters. This
+calculation is simple, but it is useful because it checks whether an estimate is
+reasonable before anyone orders stone.
+
+Now suppose the same garden must be divided into six equal beds. Each bed should
+have area thirty-six square meters. A bed that is four meters wide and nine
+meters long satisfies that requirement. A bed that is six meters wide and six
+meters long also satisfies it. The better choice depends on sunlight, walking
+space, irrigation, and the direction from which workers carry tools. Numbers
+answer one question at a time; design answers several at once.
+
+When a student solves such problems, it helps to write units beside the numbers.
+Meters multiplied by meters produce square meters. Meters divided by meters
+produce a ratio. Kilograms per crate multiplied by crates produces kilograms.
+Units are not decoration. They are a quiet guard against mistakes that otherwise
+look plausible.
+
+CALIBRATION RECORD: DIALOGUE
+
+User: I have three lists of customer names, and some names are misspelled. How
+should I combine them?
+
+Assistant: Start by normalizing the easy fields. Convert names to a consistent
+case, trim spaces, remove duplicate punctuation, and keep the original spelling
+in a separate column. Then compare records using more than one signal: email,
+phone number, postal code, and approximate name matching. Do not merge two
+records automatically when only the names are similar; mark them for review.
+
+User: What threshold should I use for approximate matching?
+
+Assistant: Use a threshold that depends on the consequence of a bad merge. For a
+mailing list, a moderately aggressive match may be acceptable if reviewed later.
+For medical, legal, or financial records, use a stricter threshold and require a
+human confirmation when identifiers disagree. The goal is not merely to reduce
+duplicates. The goal is to preserve identity correctly.
+
+User: Can I keep a report of what changed?
+
+Assistant: Yes. Record the input row identifiers, the fields that matched, the
+similarity score, and the final decision. A merge process without an audit trail
+is difficult to debug and difficult to trust.
+
+CALIBRATION RECORD: CODE AND DATA
+
+The following pseudocode describes a small batching routine:
+
+items = read_items()
+batch = []
+for item in items:
+    if item.status == "ready":
+        batch.append(item)
+    if len(batch) == 32:
+        send(batch)
+        batch = []
+if batch:
+    send(batch)
+
+The final condition is important. Without it, any remaining items fewer than
+thirty-two would never be sent. The bug might not appear in a test where the
+number of ready items is exactly divisible by thirty-two. A useful test includes
+zero items, one item, thirty-one items, thirty-two items, and thirty-three items.
+Boundary cases are small doors through which large errors enter.
+
+When a batch fails, a robust system should report which item caused the failure
+if that information is available. If the whole batch is retried blindly, one bad
+record can block every good record behind it. If every item is sent separately,
+the system may become too slow. Many production systems therefore use a hybrid:
+send batches normally, split a failing batch into smaller groups, and isolate
+the record that cannot be processed.
+
+CALIBRATION RECORD: HISTORICAL SUMMARY
+
+A harbor town grows by solving practical problems in a practical order. First it
+needs a safe landing place for boats. Then it needs warehouses close enough to
+the water that cargo can be moved before rain spoils it. Then it needs roads
+wide enough for carts, scales honest enough for trade, and records clear enough
+to settle disputes. None of these tasks is glamorous by itself, but together
+they turn a shore into a market.
+
+Merchants care about time, risk, and trust. If a ship waits three days for a
+berth, the cargo becomes more expensive. If a warehouse roof leaks, the owner
+charges for the loss or refuses the next shipment. If weights are unreliable,
+buyers lower their offers. The town that handles these ordinary details well
+attracts more trade than the town that advertises loudly but cannot unload a
+vessel efficiently.
+
+The same pattern appears in many systems. Reliability is often built from
+unromantic routines: inspection, labeling, measurement, backup plans, and clear
+responsibility. A bridge stands because someone checked the bolts. A library
+serves readers because someone returned each book to the right shelf. A program
+runs because someone handled the case where the file is missing.
+
+CALIBRATION RECORD: SCIENCE
+
+Water changes state when energy enters or leaves the system. At ordinary
+pressure, ice melts near zero degrees Celsius and liquid water boils near one
+hundred degrees Celsius. The exact behavior depends on pressure, impurities, and
+the shape of the container, but the basic idea is stable: molecules move more
+freely as thermal energy increases. A thermometer gives a convenient number for
+that average motion.
+
+In an experiment, measurement is never merely reading a display. The observer
+must decide where the sensor is placed, how long the system is allowed to settle,
+what unit is recorded, and how uncertainty is reported. A number without method
+is hard to interpret. A method without numbers is hard to compare. Good notes
+join the two.
+
+If two measurements disagree, the first question is not which person is wrong.
+The first question is what changed. Was the instrument calibrated? Was the
+sample mixed? Was the room warmer? Did the observer round the value differently?
+Careful disagreement is often the beginning of better understanding.
+
+CALIBRATION RECORD: LONG-FORM INSTRUCTION
+
+To prepare a room for a workshop, begin with the work people must actually do.
+If they will write, provide tables with enough depth for notebooks and laptops.
+If they will build prototypes, provide surfaces that can be scratched or covered.
+If they will discuss sensitive information, choose a room with a door that
+closes and a layout that does not expose screens to the hallway. The furniture
+should serve the activity rather than the photograph.
+
+Next, check power, light, sound, and air. A room with poor ventilation becomes
+tiring before lunch. A room with a loud fan makes quiet discussion difficult. A
+room with one outlet creates a knot of extension cords at the worst possible
+place. These details seem minor until they interrupt the main work. A careful
+host notices them early.
+
+Finally, write the agenda in a way that leaves room for discovery. A schedule
+that accounts for every minute usually fails as soon as the first useful
+question appears. A better agenda names the goal, the decisions required, the
+materials available, and the time reserved for breaks. People think better when
+the structure is clear and the pace is humane.
+
+CALIBRATION RECORD: TABLE REASONING
+
+Imagine the following inventory:
+
+item, count, reorder_level, supplier
+paper clips, 120, 50, north depot
+notebooks, 18, 25, stationer
+ink bottles, 7, 10, stationer
+shipping labels, 240, 100, print shop
+
+The notebooks and ink bottles require reorder because their counts are below the
+listed levels. Paper clips and shipping labels do not require reorder. If the
+stationer charges one delivery fee per order, it may be efficient to order
+notebooks and ink bottles together. If the ink is urgent and notebooks are not,
+the office might split the order despite the fee. Arithmetic identifies the
+trigger; judgment chooses the action.
+
+A report generated from this table should include the item name, current count,
+threshold, supplier, and suggested quantity. It should not merely say "two items
+low" because the person receiving the report needs to act. Specific information
+reduces the number of follow-up questions.
+
+CALIBRATION RECORD: EDGE CASES
+
+Many failures happen at the edges of a problem. A search function works for
+common words but fails for an empty query. A calendar handles ordinary meetings
+but mishandles daylight saving time. A file uploader accepts small images but
+times out on a large one. A billing system works for monthly plans but not for a
+customer who changes plans in the middle of a month. Edge cases are not rare in
+the aggregate; each is rare alone, but systems contain many edges.
+
+The practical response is to name the edges and test them. What happens when the
+input is empty? What happens when it is huge? What happens when two requests
+arrive at the same time? What happens when the network fails after the charge is
+created but before the receipt is sent? Questions like these turn vague anxiety
+into concrete work.
+
+CALIBRATION RECORD: NARRATIVE
+
+By evening the rain had softened the road, and every wheel left a dark curve in
+the clay. Mira carried the lantern low so the light would catch the stones
+before her boots did. Behind her, Tomas balanced the covered basket against his
+hip and counted the fence posts under his breath. At the twelfth post they would
+turn east, cross the narrow field, and find the old pump house where the map was
+said to be hidden.
+
+The pump house was smaller than Mira remembered. Its door hung crooked, and the
+roof had lost three rows of slate. Inside, the air smelled of rust and wet wood.
+Tomas set the basket on the floor, lifted the cloth, and took out a folded strip
+of paper. It was not the map. It was a note in their uncle's careful square
+handwriting: "If you have come this far, you already know where to look. The
+place that keeps water also keeps memory."
+
+Mira laughed, not because the clue was easy, but because it sounded exactly like
+him. Then she raised the lantern toward the pump handle and saw, scratched into
+the iron, a row of tiny numbers.
+
+CALIBRATION RECORD: POLICY
+
+A sensible retention policy begins by asking why a record exists. Some records
+are needed for daily operation, some for legal compliance, some for historical
+analysis, and some only because no one has decided to delete them. Treating all
+records the same creates two opposite risks: important evidence may disappear
+too soon, while useless material may accumulate until it becomes expensive and
+dangerous to manage.
+
+The policy should name the owner of each category, the normal retention period,
+the exception process, and the deletion method. It should also distinguish
+between deletion from the active system and expiration from backups. A record
+that is gone from the search page may still exist in a backup archive for a
+limited time. Users deserve plain language about that distinction.
+
+Good governance is not a binder on a shelf. It is the habit of making decisions
+before a crisis forces them. When the rule is clear, staff can follow it without
+inventing a new argument for every request.
+
+CALIBRATION RECORD: ERROR ANALYSIS
+
+The classifier marked forty-eight messages as urgent. Thirty-six were truly
+urgent, and twelve were ordinary. It missed eight urgent messages that should
+have been flagged. Precision is therefore thirty-six divided by forty-eight,
+which is seventy-five percent. Recall is thirty-six divided by forty-four, which
+is about eighty-one point eight percent. Both numbers matter because they answer
+different questions.
+
+If false alarms are expensive, improve precision. If missed urgent messages are
+dangerous, improve recall. A model with perfect recall may annoy users by
+flagging too much. A model with perfect precision may remain silent when help is
+needed. The right balance depends on the cost of each error.
+
+After measuring the errors, read examples. Metrics show the size of the problem,
+but examples show its shape. Perhaps the model confuses appointment reminders
+with emergencies because both contain dates. Perhaps it misses urgent messages
+that use polite language. A useful improvement often begins as a small observed
+pattern.
+
+CALIBRATION RECORD: FINANCE WITHOUT ADVICE
+
+A household budget can be described as money in, money out, obligations due
+soon, and goals due later. Rent, utilities, medicine, food, and transport are
+not the same kind of expense as entertainment or optional upgrades. Grouping
+them clearly helps a person see which decisions are flexible and which are not.
+
+Suppose income arrives every two weeks while rent is due monthly. The calendar
+matters as much as the total. A budget that balances over thirty days can still
+fail on the tenth day if the largest bill arrives before the second paycheck.
+For that reason, many people track due dates beside amounts. Cash flow is a
+sequence, not merely a sum.
+
+No table can decide a person's values. It can, however, make tradeoffs visible.
+When the numbers are honest, the conversation can move from confusion to choice.
+
+CALIBRATION RECORD: RECIPE
+
+To make a simple lentil soup, rinse one cup of lentils and check for small
+stones. Warm oil in a heavy pot, add chopped onion, carrot, and celery, and cook
+until the onion turns translucent. Add garlic, cumin, black pepper, and a little
+tomato paste. Stir for a minute so the spices bloom in the oil, then add the
+lentils and four cups of water or broth.
+
+Bring the pot to a boil, reduce the heat, and simmer until the lentils are soft.
+Salt near the end so the seasoning can be adjusted accurately. If the soup is
+too thick, add water. If it is too thin, simmer it uncovered for a few more
+minutes. Finish with lemon juice or vinegar to brighten the flavor.
+
+The recipe is forgiving because lentils absorb liquid at different rates. The
+cook watches texture rather than obeying the clock absolutely. Many procedures
+work this way: the written steps guide attention, while observation guides the
+final adjustment.
+
+CALIBRATION RECORD: SOFTWARE RELEASE
+
+A release checklist should be short enough to use and complete enough to catch
+common failures. It may include version number, migration status, test results,
+documentation updates, rollback plan, monitoring dashboard, and the name of the
+person who can approve deployment. Each item should have a clear yes or no
+answer. A vague item such as "quality looks good" is less useful than "unit
+tests passed on commit 1a2b3c and the smoke test completed at 14:30."
+
+After deployment, the team should watch the signals that would reveal trouble:
+error rate, latency, job backlog, failed logins, payment failures, and support
+messages. The first minutes after release are not a ceremony; they are an
+observation period. If the system behaves normally, the release can be marked
+complete. If it behaves strangely, the rollback plan should already be ready.
+
+The best checklists are edited after incidents. A missed step becomes a new
+line. An unnecessary step is removed. The document improves because reality has
+tested it.
+
+CALIBRATION RECORD: LEGAL STYLE WITHOUT LEGAL ADVICE
+
+A contract clause should identify who must do what, by when, under which
+conditions, and what happens if the condition is not met. Ambiguous verbs cause
+arguments. "May deliver" is different from "must deliver." "Promptly" may be
+less clear than "within five business days." Definitions matter because one
+word can carry a specific meaning throughout the document.
+
+Plain structure helps readers. Put obligations near the party responsible for
+them. Keep exceptions close to the rule they modify. Use numbering so that a
+later message can refer to a specific section. A document that is easy to
+navigate is easier to follow and easier to review.
+
+This paragraph is not legal advice. It is an observation about language,
+structure, and precision. People who need advice about rights or obligations
+should consult a qualified professional in the relevant jurisdiction.
+
+CALIBRATION RECORD: MEDICAL STYLE WITHOUT MEDICAL ADVICE
+
+When describing symptoms, useful details include onset, duration, location,
+severity, triggers, relieving factors, associated symptoms, medication, allergies,
+and relevant history. "My head hurts" is a beginning. "The pain began suddenly
+two hours ago, is worse on the right side, and came with blurred vision" is more
+informative. The purpose of detail is to help a clinician decide what questions
+to ask next.
+
+General health information should not pretend to diagnose an individual. The
+same symptom can have many causes. Context matters: age, pregnancy, chronic
+conditions, recent injury, exposure, and medication can change the level of
+concern. Clear communication helps, but urgent or severe symptoms require
+appropriate medical care rather than a long search for reassurance.
+
+CALIBRATION RECORD: DATABASES
+
+A database index is like a prepared path through a large set of records. Without
+an index, the system may scan many rows to find the few that match a condition.
+With the right index, it can jump closer to the answer. The right index depends
+on the queries people actually run. An index on last_name helps a directory
+search by last name; it does little for a report grouped by invoice month.
+
+Indexes also have costs. They take storage, and they must be updated when rows
+change. Adding every possible index can slow writes and confuse the planner. A
+practical approach is to inspect slow queries, add a targeted index, measure the
+result, and remove indexes that do not earn their keep.
+
+CALIBRATION RECORD: GEOMETRY AND LANGUAGE
+
+A triangle is determined by relationships among its sides and angles. If all
+three sides are equal, all three angles are equal. If one angle is a right angle,
+the side opposite it is the hypotenuse. The Pythagorean theorem states that, for
+a right triangle, the square of the hypotenuse equals the sum of the squares of
+the other two sides. A triangle with sides three, four, and five satisfies this
+rule because nine plus sixteen equals twenty-five.
+
+The words around the equation matter. A theorem applies under conditions. If the
+triangle is not right, the equation does not generally hold. Many mistakes in
+mathematics are not arithmetic mistakes but condition mistakes: a rule is used
+outside the situation where it belongs.
+
+CALIBRATION RECORD: OPERATIONS LOG
+
+08:00 The morning job queue contained 1,248 tasks. Most were image conversions
+from the previous evening. Average processing time was eleven seconds.
+
+08:30 Two workers were restarted after memory usage crossed the warning level.
+The queue continued to drain, but slowly.
+
+09:10 A malformed file caused repeated failures in one task group. The file was
+moved to quarantine, and the remaining tasks resumed.
+
+10:00 Queue length fell below two hundred. Error rate returned to normal. The
+incident was marked resolved, with a follow-up item to add file validation before
+tasks enter the queue.
+
+Logs like this are valuable because they preserve sequence. A graph may show
+that errors rose at nine o'clock, but the written log explains what people saw
+and what they changed. During review, both forms of evidence help the team learn.

@@ -33,7 +33,7 @@ turbogguf = "turbogguf.cli:cli"
 include = ["turbogguf*"]
 
 [tool.setuptools.package-data]
-turbogguf = ["data/calibration_prompts.txt"]
+turbogguf = ["data/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

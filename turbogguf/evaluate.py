@@ -30,6 +30,8 @@ def evaluate_gguf(
     dataset: str = "wikitext-2",
     context_size: int = 2048,
     label: str = "",
+    chunks: Optional[int] = None,
+    n_gpu_layers: int = 0,
 ) -> PerplexityResult:
     """Evaluate a GGUF model's perplexity using llama-perplexity.
 
@@ -39,6 +41,8 @@ def evaluate_gguf(
         dataset: Dataset to evaluate on
         context_size: Context window size
         label: Human-readable label for this run
+        chunks: Optional maximum number of chunks to evaluate
+        n_gpu_layers: Number of layers to offload to GPU (0 = CPU only, 99 = all)
 
     Returns:
         PerplexityResult with measured perplexity
@@ -48,8 +52,12 @@ def evaluate_gguf(
         "-m", gguf_path,
         "--perplexity",
         "-c", str(context_size),
-        "-ngl", "0",  # CPU mode for consistency
+        "-ngl", str(n_gpu_layers),
     ]
+    if dataset != "wikitext-2":
+        cmd.extend(["-f", dataset])
+    if chunks is not None:
+        cmd.extend(["--chunks", str(chunks)])
 
     print(f"Running perplexity evaluation: {label or gguf_path}")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
@@ -57,18 +65,20 @@ def evaluate_gguf(
     if result.returncode != 0:
         raise RuntimeError(f"llama-perplexity failed: {result.stderr}")
 
+    output = result.stdout + "\n" + result.stderr
+
     # Parse perplexity from output
     # Expected format: "Final estimate: PPL = 6.1234 +/- 0.0123"
-    ppl_match = re.search(r"Final estimate: PPL = ([\d.]+)", result.stdout)
+    ppl_match = re.search(r"Final estimate: PPL = ([\d.]+)", output)
     if not ppl_match:
         # Try alternative format
-        ppl_match = re.search(r"perplexity = ([\d.]+)", result.stdout)
+        ppl_match = re.search(r"perplexity = ([\d.]+)", output)
     if not ppl_match:
-        raise ValueError(f"Could not parse perplexity from output:\n{result.stdout[-500:]}")
+        raise ValueError(f"Could not parse perplexity from output:\n{output[-500:]}")
 
     ppl = float(ppl_match.group(1))
 
-    tokens_match = re.search(r"(\d+) tokens", result.stdout)
+    tokens_match = re.search(r"(\d+) tokens", output)
     tokens = int(tokens_match.group(1)) if tokens_match else 0
 
     return PerplexityResult(

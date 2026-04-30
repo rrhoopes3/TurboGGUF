@@ -163,6 +163,14 @@ turbogguf pipeline \
     --output ./turbo-Q2_K.gguf \
     --llama-cpp /path/to/llama.cpp
 
+# Or let TurboGGUF keep the safer candidate automatically
+turbogguf pipeline \
+    --model meta-llama/Llama-3.1-8B \
+    --quant Q3_K_M \
+    --output ./best-Q3_K_M.gguf \
+    --llama-cpp /path/to/llama.cpp \
+    --auto
+
 # Load turbo-Q2_K.gguf in LM Studio — it's a standard GGUF file
 ```
 

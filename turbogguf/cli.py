@@ -162,6 +162,31 @@ def _parse_max_memory(max_memory_str):
     return parsed
 
 
+def _llama_exe_name(stem: str) -> str:
+    return f"{stem}.exe" if sys.platform == "win32" else stem
+
+
+def _find_llama_cpp_tool(llama_cpp: str | Path, stem: str) -> Path:
+    """Find a llama.cpp executable in the same layouts accepted by the CLI."""
+    llama_cpp_dir = Path(llama_cpp)
+    exe = _llama_exe_name(stem)
+    candidates = [
+        llama_cpp_dir / "build" / "bin" / exe,
+        llama_cpp_dir / "bin" / exe,
+        llama_cpp_dir / exe,
+        llama_cpp_dir / "build" / exe,
+        llama_cpp_dir / "repo" / "build" / "bin" / exe,
+        llama_cpp_dir / "repo" / "bin" / exe,
+        llama_cpp_dir / "repo" / exe,
+        llama_cpp_dir / "repo" / "build" / exe,
+    ]
+    found = next((p for p in candidates if p.exists()), None)
+    if found is None:
+        searched = ", ".join(str(p) for p in candidates)
+        raise FileNotFoundError(f"{exe} not found under {llama_cpp_dir}.\nSearched: {searched}")
+    return found
+
+
 def _find_llama_cpp_tools(llama_cpp: str | Path) -> tuple[Path, Path]:
     """Find a matched converter + quantizer from one llama.cpp tree.
 
@@ -187,7 +212,7 @@ def _find_llama_cpp_tools(llama_cpp: str | Path) -> tuple[Path, Path]:
         )
 
     tool_root = converter.parent
-    exe = "llama-quantize.exe" if sys.platform == "win32" else "llama-quantize"
+    exe = _llama_exe_name("llama-quantize")
     quantizer_candidates = [
         tool_root / "build" / "bin" / exe,
         tool_root / "bin" / exe,
@@ -195,25 +220,143 @@ def _find_llama_cpp_tools(llama_cpp: str | Path) -> tuple[Path, Path]:
         tool_root / "build" / exe,
     ]
 
-    # Also check the parent llama_cpp_dir's bin/ when the converter lives in a
-    # subdirectory (e.g. converter in repo/, binaries in bin/).  This is the
-    # standard layout when you keep a source checkout alongside pre-built
-    # release binaries under one root directory.
-    if tool_root != llama_cpp_dir:
-        quantizer_candidates.extend([
-            llama_cpp_dir / "bin" / exe,
-            llama_cpp_dir / "build" / "bin" / exe,
-            llama_cpp_dir / exe,
-        ])
-
     quantizer = next((p for p in quantizer_candidates if p.exists()), None)
     if quantizer is None:
+        if tool_root != llama_cpp_dir:
+            parent_candidates = [
+                llama_cpp_dir / "bin" / exe,
+                llama_cpp_dir / "build" / "bin" / exe,
+                llama_cpp_dir / exe,
+            ]
+            parent_quantizer = next((p for p in parent_candidates if p.exists()), None)
+            if parent_quantizer is not None:
+                raise FileNotFoundError(
+                    "Refusing to mix converter and binaries from different llama.cpp trees. "
+                    f"Converter is under {tool_root}, but quantizer is under {parent_quantizer.parent}."
+                )
         searched = ", ".join(str(p) for p in quantizer_candidates)
         raise FileNotFoundError(
             f"{exe} not found under {llama_cpp_dir}.\nSearched: {searched}"
         )
 
     return converter, quantizer
+
+
+def _run_checked(cmd: list[str], *, label: str, timeout: int | None = None) -> subprocess.CompletedProcess:
+    """Run a subprocess and raise with useful stderr/stdout context on failure."""
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if result.returncode != 0:
+        details = result.stderr or result.stdout
+        raise RuntimeError(f"{label} failed:\n{details}")
+    return result
+
+
+def _convert_hf_to_f16_gguf(converter: Path, hf_dir: str | Path, gguf_path: str | Path) -> None:
+    cmd = [
+        sys.executable, str(converter),
+        str(hf_dir),
+        "--outtype", "f16",
+        "--outfile", str(gguf_path),
+    ]
+    _run_checked(cmd, label="GGUF conversion")
+
+    from turbogguf.export import patch_gguf_output_tensor
+    patched = patch_gguf_output_tensor(str(gguf_path))
+    if patched:
+        click.echo("  (output tensor renamed for pre-built llama.cpp compatibility)")
+
+
+def _run_imatrix(
+    imatrix_bin: Path,
+    f16_gguf: str | Path,
+    text_path: str | Path,
+    output_path: str | Path,
+    *,
+    chunks: int,
+    context_size: int,
+    n_gpu_layers: int = 0,
+) -> None:
+    cmd = [
+        str(imatrix_bin),
+        "-m", str(f16_gguf),
+        "-f", str(text_path),
+        "-o", str(output_path),
+        "-c", str(context_size),
+        "--chunks", str(chunks),
+        "-ngl", str(n_gpu_layers),
+    ]
+    _run_checked(cmd, label="llama-imatrix", timeout=3600)
+
+
+def _quantize_gguf(
+    quantizer: Path,
+    f16_gguf: str | Path,
+    output_path: str | Path,
+    quant: str,
+    *,
+    imatrix_path: str | Path | None = None,
+) -> None:
+    cmd = [str(quantizer)]
+    if imatrix_path is not None:
+        cmd.extend(["--imatrix", str(imatrix_path)])
+    cmd.extend([str(f16_gguf), str(output_path), quant])
+    _run_checked(cmd, label="Quantization")
+
+
+def _evaluate_gguf_ppl(
+    perplexity_bin: Path,
+    gguf_path: str | Path,
+    text_path: str | Path,
+    *,
+    chunks: int,
+    context_size: int,
+    label: str,
+    n_gpu_layers: int = 0,
+):
+    from turbogguf.evaluate import evaluate_gguf
+
+    return evaluate_gguf(
+        str(gguf_path),
+        str(perplexity_bin),
+        dataset=str(text_path),
+        context_size=context_size,
+        label=label,
+        chunks=chunks,
+        n_gpu_layers=n_gpu_layers,
+    )
+
+
+def _default_auto_text_path() -> Path:
+    return Path(__file__).parent / "data" / "auto_calibration.txt"
+
+
+def _write_auto_report(
+    output: str | Path,
+    *,
+    stock_result,
+    rotated_result,
+    verdict: str,
+    margin: float,
+    chunks: int,
+    context_size: int,
+    text_path: str | Path,
+    quant: str,
+    imatrix: bool,
+) -> Path:
+    report_path = Path(output).with_name("comparison_report.json")
+    data = {
+        "quant": quant,
+        "chunks": chunks,
+        "context_size": context_size,
+        "text_path": str(text_path),
+        "imatrix": imatrix,
+        "win_margin_ppl": margin,
+        "stock": stock_result.__dict__,
+        "rotated": rotated_result.__dict__,
+        "verdict": verdict,
+    }
+    report_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return report_path
 
 
 @cli.command()
@@ -375,6 +518,21 @@ def rotate(
               help="Load dtype. Use bfloat16 for models stored as bf16 to avoid doubling RAM during conversion.")
 @click.option("--trust-remote-code", is_flag=True, help="Trust remote code")
 @click.option("--keep-intermediate", is_flag=True, help="Keep intermediate files")
+@click.option("--auto", is_flag=True, help="Quantize stock and rotated candidates, evaluate both, and keep the better GGUF.")
+@click.option("--auto-text", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="Text file used for --auto imatrix + perplexity. Defaults to bundled calibration text.")
+@click.option("--auto-chunks", default=20, show_default=True, type=click.IntRange(1),
+              help="Number of chunks for --auto imatrix/perplexity bake-off.")
+@click.option("--auto-context-size", default=512, show_default=True, type=click.IntRange(128),
+              help="Context size for --auto imatrix/perplexity bake-off.")
+@click.option("--auto-margin", default=0.01, show_default=True, type=float,
+              help="Rotated candidate must beat stock by at least this PPL delta.")
+@click.option("--no-auto-imatrix", is_flag=True,
+              help="Disable imatrix during --auto quantization.")
+@click.option("--auto-ngl", default=0, show_default=True, type=click.IntRange(0),
+              help="GPU layers for --auto imatrix/perplexity (0=CPU, 99=all). Set to 99 to use the GPU and finish in minutes instead of hours.")
+@click.option("--auto-workdir", type=click.Path(file_okay=False), default=None,
+              help="Directory for --auto intermediate files (stock + rotated HF dirs, F16 GGUFs, imatrix). Defaults to <output_parent>/auto_intermediate so big files land next to your final GGUF, not on the system temp drive.")
 @_equivalence_gate_options
 def pipeline(
     model,
@@ -388,6 +546,14 @@ def pipeline(
     dtype,
     trust_remote_code,
     keep_intermediate,
+    auto,
+    auto_text,
+    auto_chunks,
+    auto_context_size,
+    auto_margin,
+    no_auto_imatrix,
+    auto_ngl,
+    auto_workdir,
     rotation_precision,
     calibration_text,
     calibration_file,
@@ -402,6 +568,7 @@ def pipeline(
     import torch
     import tempfile
     import shutil
+    import gc
     from turbogguf.model_loader import load_model
     from turbogguf.rotation import rotate_model
     from turbogguf.export import export_rotated_model
@@ -415,16 +582,24 @@ def pipeline(
 
     try:
         converter, quantizer = _find_llama_cpp_tools(llama_cpp)
+        perplexity_bin = _find_llama_cpp_tool(llama_cpp, "llama-perplexity") if auto else None
+        imatrix_bin = None
+        if auto and not no_auto_imatrix:
+            imatrix_bin = _find_llama_cpp_tool(llama_cpp, "llama-imatrix")
     except FileNotFoundError as e:
         click.echo(f"Error: {e}")
         sys.exit(1)
 
     click.echo(f"Using converter: {converter}")
     click.echo(f"Using quantizer: {quantizer}")
+    if auto:
+        click.echo(f"Using perplexity: {perplexity_bin}")
+        if imatrix_bin is not None:
+            click.echo(f"Using imatrix: {imatrix_bin}")
 
     # Step 1: Rotate
     click.echo("=" * 60)
-    click.echo("STEP 1/3: Rotating model weights")
+    click.echo("STEP 1/3: Preparing model weights")
     click.echo("=" * 60)
     if mem:
         click.echo(f"Memory map: {mem}")
@@ -436,6 +611,29 @@ def pipeline(
     )
 
     storage_dtype_str = str(next(model_obj.parameters()).dtype).removeprefix("torch.")
+    auto_text_path = Path(auto_text) if auto_text else _default_auto_text_path()
+    work_dir = None
+    stock_dir = None
+
+    if auto:
+        if auto_workdir:
+            work_dir = Path(auto_workdir)
+        else:
+            # Default next to the output GGUF so the ~5x output-size of
+            # intermediate files lands on the same drive as --output rather
+            # than the system temp drive (which is often much smaller).
+            work_dir = Path(output).parent / "auto_intermediate"
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        stock_dir = work_dir / "stock_hf"
+        click.echo(f"Saving stock candidate to {stock_dir}...")
+        stock_dir.mkdir(parents=True, exist_ok=True)
+        model_obj.save_pretrained(
+            str(stock_dir),
+            safe_serialization=True,
+            max_shard_size="4GB",
+        )
+        tokenizer.save_pretrained(str(stock_dir))
 
     cli_original_dtypes = {}
     if not no_equivalence_gate:
@@ -483,15 +681,15 @@ def pipeline(
     _downcast_after_gate(model_obj, cli_original_dtypes, storage_dtype_str)
 
     if keep_intermediate:
-        rotated_dir = str(Path(output).parent / "rotated_intermediate")
+        rotated_parent = work_dir if auto and work_dir is not None else Path(output).parent
+        rotated_dir = str(rotated_parent / "rotated_intermediate")
     else:
-        rotated_dir = tempfile.mkdtemp(prefix="turbogguf_")
+        rotated_dir = str(work_dir / "rotated_hf") if auto and work_dir is not None else tempfile.mkdtemp(prefix="turbogguf_")
 
     export_rotated_model(model_obj, tokenizer, rotated_dir, metadata=metadata)
 
     # Free model memory
     del model_obj
-    import gc
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -503,48 +701,126 @@ def pipeline(
     click.echo("=" * 60)
 
     f16_gguf = str(Path(rotated_dir) / "model.gguf")
-    cmd_convert = [
-        sys.executable, str(converter),
-        rotated_dir,
-        "--outtype", "f16",
-        "--outfile", f16_gguf,
-    ]
-    result = subprocess.run(cmd_convert, capture_output=True, text=True)
-    if result.returncode != 0:
-        click.echo(f"Conversion failed:\n{result.stderr}")
+    try:
+        _convert_hf_to_f16_gguf(converter, rotated_dir, f16_gguf)
+        stock_f16_gguf = None
+        if auto:
+            stock_f16_gguf = work_dir / "stock-f16.gguf"
+            click.echo("Converting stock candidate to GGUF (F16)...")
+            _convert_hf_to_f16_gguf(converter, stock_dir, stock_f16_gguf)
+    except RuntimeError as e:
+        click.echo(str(e))
         sys.exit(1)
     click.echo("GGUF conversion complete.")
 
-    # Step 2b: Post-process GGUF for Gemma4 binary compatibility.
     # Pre-built llama.cpp ≤b8638 looks for tensor "output" (no .weight suffix)
-    # for Gemma4. Rename it so the pre-built quantizer and inference binary can
-    # load the GGUF without rebuilding llama.cpp.
-    from turbogguf.export import patch_gguf_output_tensor
-    patched = patch_gguf_output_tensor(f16_gguf)
-    if patched:
-        click.echo("  (output tensor renamed for pre-built llama.cpp compatibility)")
-
     # Step 3: Quantize
     click.echo()
     click.echo("=" * 60)
     click.echo(f"STEP 3/3: Quantizing to {quant}")
     click.echo("=" * 60)
 
-    cmd_quant = [str(quantizer), f16_gguf, output, quant]
-    result = subprocess.run(cmd_quant, capture_output=True, text=True)
-    if result.returncode != 0:
-        click.echo(f"Quantization failed:\n{result.stderr}")
+    try:
+        if auto:
+            rotated_quant_gguf = work_dir / "rotated-quant.gguf"
+            stock_quant_gguf = work_dir / "stock-quant.gguf"
+            rotated_imatrix = None
+            stock_imatrix = None
+
+            if imatrix_bin is not None:
+                rotated_imatrix = work_dir / "rotated.imatrix"
+                stock_imatrix = work_dir / "stock.imatrix"
+                click.echo(f"Building stock imatrix on {auto_chunks} chunk(s) (ngl={auto_ngl})...")
+                _run_imatrix(
+                    imatrix_bin, stock_f16_gguf, auto_text_path, stock_imatrix,
+                    chunks=auto_chunks, context_size=auto_context_size,
+                    n_gpu_layers=auto_ngl,
+                )
+                click.echo(f"Building rotated imatrix on {auto_chunks} chunk(s) (ngl={auto_ngl})...")
+                _run_imatrix(
+                    imatrix_bin, f16_gguf, auto_text_path, rotated_imatrix,
+                    chunks=auto_chunks, context_size=auto_context_size,
+                    n_gpu_layers=auto_ngl,
+                )
+
+            click.echo("Quantizing stock candidate...")
+            _quantize_gguf(
+                quantizer, stock_f16_gguf, stock_quant_gguf, quant,
+                imatrix_path=stock_imatrix,
+            )
+            click.echo("Quantizing rotated candidate...")
+            _quantize_gguf(
+                quantizer, f16_gguf, rotated_quant_gguf, quant,
+                imatrix_path=rotated_imatrix,
+            )
+
+            click.echo()
+            click.echo("=" * 60)
+            click.echo(f"AUTO: Evaluating {auto_chunks} chunk(s) (ngl={auto_ngl})")
+            click.echo("=" * 60)
+            stock_result = _evaluate_gguf_ppl(
+                perplexity_bin, stock_quant_gguf, auto_text_path,
+                chunks=auto_chunks, context_size=auto_context_size, label="stock",
+                n_gpu_layers=auto_ngl,
+            )
+            rotated_result = _evaluate_gguf_ppl(
+                perplexity_bin, rotated_quant_gguf, auto_text_path,
+                chunks=auto_chunks, context_size=auto_context_size, label="rotated",
+                n_gpu_layers=auto_ngl,
+            )
+
+            rotated_wins = rotated_result.perplexity <= stock_result.perplexity - auto_margin
+            winner = rotated_quant_gguf if rotated_wins else stock_quant_gguf
+            verdict = "rotated" if rotated_wins else "stock"
+
+            output_path = Path(output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            if output_path.exists():
+                output_path.unlink()
+            shutil.copy2(winner, output_path)
+
+            report_path = _write_auto_report(
+                output,
+                stock_result=stock_result,
+                rotated_result=rotated_result,
+                verdict=verdict,
+                margin=auto_margin,
+                chunks=auto_chunks,
+                context_size=auto_context_size,
+                text_path=auto_text_path,
+                quant=quant,
+                imatrix=imatrix_bin is not None,
+            )
+
+            click.echo(f"Stock PPL:   {stock_result.perplexity:.4f}")
+            click.echo(f"Rotated PPL: {rotated_result.perplexity:.4f}")
+            if rotated_wins:
+                delta = stock_result.perplexity - rotated_result.perplexity
+                click.echo(f"Verdict: rotated won by {delta:.4f} PPL; keeping rotated.")
+            else:
+                delta = rotated_result.perplexity - stock_result.perplexity
+                click.echo(f"Verdict: stock was better/within margin ({delta:.4f} PPL); keeping stock.")
+            click.echo(f"Comparison report written to {report_path}")
+        else:
+            _quantize_gguf(quantizer, f16_gguf, output, quant)
+    except RuntimeError as e:
+        click.echo(str(e))
         sys.exit(1)
 
     # Cleanup
-    if not keep_intermediate:
+    if not keep_intermediate and auto and work_dir is not None:
+        shutil.rmtree(work_dir, ignore_errors=True)
+    elif not keep_intermediate:
         shutil.rmtree(rotated_dir, ignore_errors=True)
 
     output_size = Path(output).stat().st_size / (1024**3)
     click.echo()
     click.echo("=" * 60)
     click.echo(f"Done! Output: {output} ({output_size:.2f} GB)")
-    click.echo(f"Quant: {quant} with TurboGGUF rotation (seed={seed})")
+    if auto:
+        click.echo(f"Quant: {quant} with --auto bake-off (seed={seed})")
+    else:
+        click.echo(f"Quant: {quant} with TurboGGUF rotation (seed={seed})")
     click.echo("Load in LM Studio — it's a standard GGUF file.")
     click.echo("=" * 60)
 
