@@ -86,11 +86,20 @@ These numbers were collected before the `v_proj.bias` fix and without a forward-
 
 ## Status
 
-Items 1 and 2 below are addressed by the current branch; item 3 still needs a real-model run on the user's hardware.
+Items 1 and 2 are resolved. Item 3 was measured on Yi-1.5-9B — rotation helps the precision story but does not yet beat stock at Q3_K_M on this architecture.
 
-1. **bf16/fp16 precision drift on pure-LLaMA/Yi architectures — addressed.** The pipeline now upcasts every parameter to fp32 before fusion + R1 + R2 and casts back only after both rotations complete (`rotate_model(rotation_precision="fp32")`). This eliminates the per-helper bf16 → fp32 → bf16 round-trip accumulation that compounded across ~20 mutations per layer. Set `--rotation-precision original` to fall back to the legacy behavior if the doubled fp32 working set is too large.
+1. **bf16/fp16 precision drift on pure-LLaMA/Yi architectures — fixed.** The pipeline now upcasts every parameter to fp32 before fusion + R1 + R2 and casts back only after both rotations complete (`rotate_model(rotation_precision="fp32")`). The CLI also captures the equivalence-gate reference *before* the downcast so both measurements are in fp32; this tightened `max_abs_diff` from ~7e-2 (fp16 quantisation noise) to 3.6e-5 (floating-point rounding only). Set `--rotation-precision original` to fall back to the legacy per-helper round-trip if the doubled fp32 working set is too large.
 2. **Forward-equivalence gate landed.** Reference logits are captured on a small bundled set of diverse calibration prompts (instruction / code / story / math / dialogue / list / SQL) before rotation, then re-measured on the rotated model. The gate reports `max_abs_diff`, `mean_abs_diff`, and `max_kl_div`; default behavior is **warn + continue** so users see exactly how far their model drifted, and `--strict` upgrades it to a hard abort (non-zero exit) for CI. The full report is written to `equivalence_report.json` and embedded into `rotation_manifest.json`.
-3. **Headline claim not yet independently re-validated.** "Q2 quality that performs like Q4" comes from the QuaRot paper on Llama-3.1-8B (INT4). On Qwen2.5-3B, rotated Q3 beats stock Q3 but does not match stock Q4. With items 1 and 2 in place, the claim should be re-measured on Llama-3.1-8B directly using `turbogguf pipeline --strict --quant Q3_K_M` plus an `imatrix` pass. Until that's published, treat the headline as "rotation helps Q2/Q3 on the architectures where the gate passes" rather than a universal claim.
+3. **Yi-1.5-9B Q3_K_M measured — rotation hurts on this architecture.** Full pipeline run on Yi-1.5-9B (wikitext-2 test, 50×512-token chunks, RTX 3090):
+
+   | Variant | PPL |
+   |---|---|
+   | Stock Q3_K_M | **5.87** |
+   | Turbo Q3_K_M (old, bf16 drift) | 8.42 |
+   | Turbo Q3_K_M (fp32 fix) | 7.78 |
+   | Turbo Q3_K_M (fp32 fix + imatrix) | 7.46 |
+
+   The precision fix moved PPL from 8.42 → 7.46 (with imatrix), but rotation still regresses quality on Yi-1.5-9B at Q3_K_M. The equivalence gate passes cleanly (`max_abs_diff=3.6e-5`, `max_kl=1.9e-11`), confirming the regression is not a rotation-math bug — the rotated weight distribution is simply harder to quantize at 3-bit for this architecture. This matches reports of architecture-specific variance in the QuaRot literature. Llama-3.1-8B (the paper's reference architecture) has not yet been measured with this implementation.
 
 ## Verification
 
