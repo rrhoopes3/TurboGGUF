@@ -7,12 +7,92 @@ Usage:
     turbogguf info --model <HF_ID>
 """
 
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 import click
+
+
+def _equivalence_gate_options(f):
+    """Shared decorator for the forward-equivalence gate flags."""
+    f = click.option(
+        "--no-equivalence-gate",
+        is_flag=True,
+        help="Skip the pre/post forward-equivalence check (not recommended).",
+    )(f)
+    f = click.option(
+        "--strict",
+        is_flag=True,
+        help="Fail with non-zero exit if the equivalence gate doesn't pass.",
+    )(f)
+    f = click.option(
+        "--equivalence-threshold",
+        type=float,
+        default=1e-4,
+        show_default=True,
+        help="Max acceptable |logit_rotated - logit_original| on calibration prompts.",
+    )(f)
+    f = click.option(
+        "--calibration-file",
+        type=click.Path(exists=True, dir_okay=False),
+        default=None,
+        help="Optional file with one calibration prompt per line.",
+    )(f)
+    f = click.option(
+        "--calibration-text",
+        default=None,
+        help="Inline single-prompt override for the equivalence gate.",
+    )(f)
+    f = click.option(
+        "--rotation-precision",
+        type=click.Choice(["fp32", "original"]),
+        default="fp32",
+        show_default=True,
+        help="fp32: upcast all weights to fp32 for rotation (recommended). "
+        "original: keep legacy per-helper round-trip behavior.",
+    )(f)
+    return f
+
+
+def _run_equivalence_gate(
+    model,
+    tokenizer,
+    references,
+    *,
+    prompts,
+    threshold: float,
+    strict: bool,
+    output_path: Path | None,
+):
+    """Re-run prompts and emit report/manifest entries. Returns the report dict."""
+    from turbogguf.equivalence import compare_logits, EquivalenceFailure
+
+    report = compare_logits(
+        model,
+        tokenizer,
+        prompts=prompts,
+        references=references,
+        threshold_max_abs=threshold,
+        threshold_mean_abs=threshold * 0.5,
+    )
+    click.echo(report.summary())
+
+    if output_path is not None:
+        report_path = output_path / "equivalence_report.json"
+        report.write_json(report_path)
+        click.echo(f"Equivalence report written to {report_path}")
+
+    if not report.passed:
+        if strict:
+            raise EquivalenceFailure(report)
+        click.echo(
+            "Warning: equivalence gate did NOT pass. Re-run with --strict to abort, "
+            "or inspect equivalence_report.json for per-prompt stats."
+        )
+    return report
 
 
 @click.group()
@@ -110,24 +190,55 @@ def _find_llama_cpp_tools(llama_cpp: str | Path) -> tuple[Path, Path]:
 @click.option("--device-map", default="cpu", help="Device map: 'cpu', 'auto', or 'cuda:0'")
 @click.option("--max-memory", default=None, help='Max memory JSON, e.g. \'{"cpu": "50GB", "cuda:0": "22GB"}\'')
 @click.option("--trust-remote-code", is_flag=True, help="Trust remote code for model loading")
-def rotate(model, output, seed, no_r2, dtype, device_map, max_memory, trust_remote_code):
+@click.option(
+    "--audit-only",
+    is_flag=True,
+    help="Run rotation + equivalence gate, print the report, but do NOT save the rotated model.",
+)
+@_equivalence_gate_options
+def rotate(
+    model,
+    output,
+    seed,
+    no_r2,
+    dtype,
+    device_map,
+    max_memory,
+    trust_remote_code,
+    audit_only,
+    rotation_precision,
+    calibration_text,
+    calibration_file,
+    equivalence_threshold,
+    strict,
+    no_equivalence_gate,
+):
     """Apply Hadamard rotation to model weights.
 
-    Loads a HuggingFace model, fuses RMSNorm weights, applies R1+R2
-    rotations, and saves as a standard HF checkpoint. The rotated model
-    produces identical FP16 outputs but quantizes much better at low bit
-    widths (Q2_K, Q3_K).
+    Loads a HuggingFace model, captures reference logits on a small set of
+    calibration prompts, fuses RMSNorm weights, applies R1+R2 rotations,
+    re-runs the prompts and verifies the logits match, then saves as a
+    standard HF checkpoint. The rotated model produces near-identical
+    outputs but quantizes much better at low bit widths (Q2_K, Q3_K).
     """
     import torch
     from turbogguf.model_loader import load_model
     from turbogguf.rotation import rotate_model
     from turbogguf.export import export_rotated_model
+    from turbogguf.equivalence import (
+        capture_logits,
+        load_prompts,
+        EquivalenceFailure,
+    )
 
     dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16}
     mem = _parse_max_memory(max_memory)
 
     click.echo(f"TurboGGUF v0.1.0 — Rotating {model}")
-    click.echo(f"Seed: {seed}, R2: {'disabled' if no_r2 else 'enabled'}")
+    click.echo(
+        f"Seed: {seed}, R2: {'disabled' if no_r2 else 'enabled'}, "
+        f"rotation precision: {rotation_precision}"
+    )
     if mem:
         click.echo(f"Memory map: {mem}")
     click.echo()
@@ -140,12 +251,56 @@ def rotate(model, output, seed, no_r2, dtype, device_map, max_memory, trust_remo
         trust_remote_code=trust_remote_code,
     )
 
+    references = None
+    prompts: list[str] = []
+    if not no_equivalence_gate:
+        prompts = load_prompts(
+            calibration_file=calibration_file,
+            calibration_text=calibration_text,
+        )
+        click.echo(f"Capturing reference logits on {len(prompts)} calibration prompt(s)...")
+        references = capture_logits(model_obj, tokenizer, prompts)
+
     metadata = rotate_model(
         model_obj,
         handler=handler,
         seed=seed,
         apply_r2=not no_r2,
+        rotation_precision=rotation_precision,
     )
+
+    output_path = Path(output)
+    if not audit_only:
+        output_path.mkdir(parents=True, exist_ok=True)
+
+    report = None
+    try:
+        if not no_equivalence_gate:
+            report = _run_equivalence_gate(
+                model_obj,
+                tokenizer,
+                references,
+                prompts=prompts,
+                threshold=equivalence_threshold,
+                strict=strict,
+                output_path=output_path if not audit_only else None,
+            )
+            metadata["equivalence"] = report.to_dict()
+        else:
+            click.echo("Equivalence gate skipped (--no-equivalence-gate).")
+    except EquivalenceFailure as e:
+        if not audit_only:
+            metadata["equivalence"] = e.report.to_dict()
+            (output_path / "rotation_manifest.json").write_text(
+                json.dumps(metadata, indent=2), encoding="utf-8"
+            )
+        click.echo(f"Aborting (--strict): {e}")
+        sys.exit(1)
+
+    if audit_only:
+        click.echo("Audit-only mode: skipping save.")
+        click.echo(json.dumps(metadata, indent=2))
+        return
 
     export_rotated_model(model_obj, tokenizer, output, metadata=metadata)
 
@@ -170,7 +325,26 @@ def rotate(model, output, seed, no_r2, dtype, device_map, max_memory, trust_remo
               help="Load dtype. Use bfloat16 for models stored as bf16 to avoid doubling RAM during conversion.")
 @click.option("--trust-remote-code", is_flag=True, help="Trust remote code")
 @click.option("--keep-intermediate", is_flag=True, help="Keep intermediate files")
-def pipeline(model, output, quant, seed, llama_cpp, no_r2, device_map, max_memory, dtype, trust_remote_code, keep_intermediate):
+@_equivalence_gate_options
+def pipeline(
+    model,
+    output,
+    quant,
+    seed,
+    llama_cpp,
+    no_r2,
+    device_map,
+    max_memory,
+    dtype,
+    trust_remote_code,
+    keep_intermediate,
+    rotation_precision,
+    calibration_text,
+    calibration_file,
+    equivalence_threshold,
+    strict,
+    no_equivalence_gate,
+):
     """Full pipeline: rotate -> convert to GGUF -> quantize.
 
     One command to go from HuggingFace model to quantized GGUF.
@@ -181,6 +355,11 @@ def pipeline(model, output, quant, seed, llama_cpp, no_r2, device_map, max_memor
     from turbogguf.model_loader import load_model
     from turbogguf.rotation import rotate_model
     from turbogguf.export import export_rotated_model
+    from turbogguf.equivalence import (
+        capture_logits,
+        load_prompts,
+        EquivalenceFailure,
+    )
 
     mem = _parse_max_memory(max_memory)
 
@@ -205,7 +384,41 @@ def pipeline(model, output, quant, seed, llama_cpp, no_r2, device_map, max_memor
         model, dtype=dtype_map[dtype], device_map=device_map, max_memory=mem,
         trust_remote_code=trust_remote_code,
     )
-    metadata = rotate_model(model_obj, handler=handler, seed=seed, apply_r2=not no_r2)
+
+    references = None
+    prompts: list[str] = []
+    if not no_equivalence_gate:
+        prompts = load_prompts(
+            calibration_file=calibration_file,
+            calibration_text=calibration_text,
+        )
+        click.echo(f"Capturing reference logits on {len(prompts)} calibration prompt(s)...")
+        references = capture_logits(model_obj, tokenizer, prompts)
+
+    metadata = rotate_model(
+        model_obj,
+        handler=handler,
+        seed=seed,
+        apply_r2=not no_r2,
+        rotation_precision=rotation_precision,
+    )
+
+    if not no_equivalence_gate:
+        try:
+            report = _run_equivalence_gate(
+                model_obj,
+                tokenizer,
+                references,
+                prompts=prompts,
+                threshold=equivalence_threshold,
+                strict=strict,
+                output_path=None,  # written into the rotated dir below
+            )
+            metadata["equivalence"] = report.to_dict()
+        except EquivalenceFailure as e:
+            metadata["equivalence"] = e.report.to_dict()
+            click.echo(f"Aborting (--strict): {e}")
+            sys.exit(1)
 
     if keep_intermediate:
         rotated_dir = str(Path(output).parent / "rotated_intermediate")

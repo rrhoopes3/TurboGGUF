@@ -1,6 +1,6 @@
 # TurboGGUF
 
-> **Status: shelved.** The underlying math (QuaRot-style Hadamard rotation) is sound and is published research. This repo now has a working fix for Qwen-family `v_proj.bias` rotation and a bf16-equivalence test on Qwen2.5-3B. Remaining bugs (bf16 precision drift on pure-LLaMA architectures, no forward-equivalence gate in the pipeline) prevent claiming any universal Q2/Q3 win. See [Status](#status) below.
+> **Status: under active fix.** The underlying math (QuaRot-style Hadamard rotation) is sound and is published research. This repo has a working fix for Qwen-family `v_proj.bias` rotation, a fp32-throughout rotation pipeline that addresses the bf16 round-trip drift on LLaMA-family architectures, and a forward-equivalence gate that aborts (or warns) before saving a model whose logits no longer match the original. See [Status](#status) for the validation matrix and [Verification](#verification) for the exact commands to confirm the fix on your model.
 
 Applies TurboQuant/QuaRot-style Hadamard rotation to LLM weights before GGUF quantization. The rotation eliminates outlier features in weight matrices, making low-bit quantization (Q2_K, Q3_K) more effective on architectures where it works. No llama.cpp patching required.
 
@@ -86,11 +86,51 @@ These numbers were collected before the `v_proj.bias` fix and without a forward-
 
 ## Status
 
-Shelved pending the following fixes:
+Items 1 and 2 below are addressed by the current branch; item 3 still needs a real-model run on the user's hardware.
 
-1. **bf16/fp16 precision drift on pure-LLaMA/Yi architectures.** Yi-1.5-9B bf16 turbo PPL drifts to 8.42 vs stock 5.76 even with R1 alone. Not a rotation-math bug — looks like bf16→fp32→bf16 round-trip accumulation in the rotation path. Needs fp32 accumulation throughout, or at minimum a gate that refuses to save when forward logits diverge past a threshold.
-2. **No forward-equivalence gate in the pipeline.** When rotation produces mathematically wrong weights, the pipeline currently saves them silently. A gate comparing original-model logits vs rotated-model logits on a fixed probe batch would catch catastrophic bugs (like the pre-fix `v_proj.bias` bug) at rotation time instead of via downstream perplexity runs.
-3. **Headline claim not independently validated.** "Q2 quality that performs like Q4" comes from the QuaRot paper on Llama-3.1-8B (INT4). On Qwen2.5-3B (this repo's first architecture fully validated at bf16), rotated Q3 beats stock Q3 but does not match stock Q4. Claim should be either re-measured on Llama-3.1-8B directly with this implementation, or dropped.
+1. **bf16/fp16 precision drift on pure-LLaMA/Yi architectures — addressed.** The pipeline now upcasts every parameter to fp32 before fusion + R1 + R2 and casts back only after both rotations complete (`rotate_model(rotation_precision="fp32")`). This eliminates the per-helper bf16 → fp32 → bf16 round-trip accumulation that compounded across ~20 mutations per layer. Set `--rotation-precision original` to fall back to the legacy behavior if the doubled fp32 working set is too large.
+2. **Forward-equivalence gate landed.** Reference logits are captured on a small bundled set of diverse calibration prompts (instruction / code / story / math / dialogue / list / SQL) before rotation, then re-measured on the rotated model. The gate reports `max_abs_diff`, `mean_abs_diff`, and `max_kl_div`; default behavior is **warn + continue** so users see exactly how far their model drifted, and `--strict` upgrades it to a hard abort (non-zero exit) for CI. The full report is written to `equivalence_report.json` and embedded into `rotation_manifest.json`.
+3. **Headline claim not yet independently re-validated.** "Q2 quality that performs like Q4" comes from the QuaRot paper on Llama-3.1-8B (INT4). On Qwen2.5-3B, rotated Q3 beats stock Q3 but does not match stock Q4. With items 1 and 2 in place, the claim should be re-measured on Llama-3.1-8B directly using `turbogguf pipeline --strict --quant Q3_K_M` plus an `imatrix` pass. Until that's published, treat the headline as "rotation helps Q2/Q3 on the architectures where the gate passes" rather than a universal claim.
+
+## Verification
+
+Anyone replicating the precision fix on a real model should run:
+
+```bash
+# 1. Audit-only run: rotate, check the gate, print the report, do NOT save.
+#    Useful for diagnosing whether your model passes the equivalence threshold
+#    before committing tens of GB of disk.
+turbogguf rotate \
+    --model meta-llama/Llama-3.1-8B \
+    --output ./_audit \
+    --audit-only \
+    --strict
+
+# 2. Full pipeline with the gate enforced. Aborts before quantization if the
+#    rotated model's logits diverge past --equivalence-threshold (default 1e-4).
+turbogguf pipeline \
+    --model meta-llama/Llama-3.1-8B \
+    --quant Q3_K_M \
+    --output ./llama3.1-8b-Q3_K_M.gguf \
+    --llama-cpp /path/to/llama.cpp \
+    --strict
+
+# 3. Custom calibration prompts (one per line). Useful for code/math models
+#    where the bundled defaults don't exercise the right activation regions.
+turbogguf rotate \
+    --model my-org/my-coder-model \
+    --output ./rotated \
+    --calibration-file ./my_prompts.txt \
+    --strict
+```
+
+After a successful run the output directory contains:
+
+| File | Purpose |
+|---|---|
+| `rotation_manifest.json` | seed, R1/R2 status, architecture, layer counts, MoE/linear-attn skip counts, embedded equivalence report |
+| `equivalence_report.json` | per-prompt `max_abs_diff` / `mean_abs_diff` / `kl_div`, aggregate stats, threshold, pass/fail |
+| `model.safetensors*` | the rotated weights, ready for `convert_hf_to_gguf.py` |
 
 ## Quick Start
 

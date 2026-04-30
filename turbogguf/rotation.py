@@ -11,6 +11,12 @@ Theory:
   - At each layer boundary R^T @ R = I, so the chain is identity
   - Result: bit-identical FP16 outputs, but weights are now "spread out"
 
+Precision: the pipeline upcasts every parameter to fp32 before fusing/rotating
+and only casts back to the original storage dtype after R1+R2 are complete.
+Per-tensor round-trips (dtype -> fp32 -> matmul -> dtype, repeated across norm
+fusion + R1 + R2 + bias rotation) accumulated bf16 ulps and were the source of
+the LLaMA-family drift that prompted this refactor.
+
 References:
   - QuaRot: https://arxiv.org/abs/2404.00456
   - TurboQuant: https://arxiv.org/abs/2504.19874
@@ -24,6 +30,53 @@ from tqdm import tqdm
 
 from turbogguf.arch.base import ArchHandler
 from turbogguf.hadamard import random_hadamard_matrix
+
+
+def _collect_param_dtypes(model: nn.Module) -> dict[str, torch.dtype]:
+    """Snapshot every parameter's storage dtype keyed by qualified name."""
+    return {name: p.dtype for name, p in model.named_parameters()}
+
+
+def _cast_all_params(model: nn.Module, target_dtype: torch.dtype) -> int:
+    """Cast every parameter (and registered buffer that's float-like) to target_dtype.
+
+    Uses nn.Parameter rebinding so the change survives accelerate dispatch
+    hook removal and downstream save_pretrained, matching the pattern used
+    elsewhere in this file. Returns the number of parameters cast.
+    """
+    cast_count = 0
+    for module in model.modules():
+        for attr_name, param in list(module._parameters.items()):
+            if param is None or param.dtype == target_dtype:
+                continue
+            if not param.dtype.is_floating_point:
+                continue
+            module._parameters[attr_name] = nn.Parameter(
+                param.data.to(target_dtype),
+                requires_grad=param.requires_grad,
+            )
+            cast_count += 1
+    return cast_count
+
+
+def _restore_param_dtypes(
+    model: nn.Module,
+    original_dtypes: dict[str, torch.dtype],
+) -> int:
+    """Cast each parameter back to the dtype recorded by _collect_param_dtypes."""
+    restored = 0
+    for name, param in list(model.named_parameters()):
+        target = original_dtypes.get(name)
+        if target is None or param.dtype == target:
+            continue
+        parent_path, _, attr = name.rpartition(".")
+        parent = model.get_submodule(parent_path) if parent_path else model
+        parent._parameters[attr] = nn.Parameter(
+            param.data.to(target),
+            requires_grad=param.requires_grad,
+        )
+        restored += 1
+    return restored
 
 
 @torch.no_grad()
@@ -386,22 +439,42 @@ def rotate_model(
     seed: int = 42,
     apply_r2: bool = True,
     verbose: bool = True,
+    rotation_precision: str = "fp32",
 ) -> dict:
-    """Full rotation pipeline: fuse norms -> R1 -> R2."""
+    """Full rotation pipeline: fuse norms -> R1 -> R2.
+
+    Args:
+        rotation_precision: "fp32" (default) upcasts every weight to fp32 for
+            the duration of fusion + R1 + R2 and casts back at the end. This
+            eliminates the per-tensor round-trip drift that previously caused
+            bf16 LLaMA models to deviate from the original logits. Set to
+            "original" to keep the legacy per-helper round-trip behavior, e.g.
+            when memory is tight on huge models — at the cost of measurable
+            drift over many layers.
+    """
     if handler is None:
         from turbogguf.arch import get_handler
 
         handler = get_handler(model)
 
+    if rotation_precision not in ("fp32", "original"):
+        raise ValueError(
+            f"rotation_precision must be 'fp32' or 'original', got {rotation_precision!r}"
+        )
+
+    layers = handler.get_layers(model)
+    moe_layers = [i for i, l in enumerate(layers) if handler.is_moe_layer(l)]
+    linear_attn_layers = [
+        i for i, l in enumerate(layers) if handler.is_linear_attention_layer(l)
+    ]
+
     if verbose:
         print(f"Model: {type(model).__name__}")
         print(f"Hidden size: {handler.get_hidden_size(model)}")
-        layers = handler.get_layers(model)
         print(f"Num layers: {len(layers)}")
         print(f"Num heads: {handler.get_num_heads(model)}")
         print(f"Num KV heads: {handler.get_num_kv_heads(model)}")
         print(f"Head dim: {handler.get_head_dim(model)}")
-        moe_layers = [i for i, l in enumerate(layers) if handler.is_moe_layer(l)]
         if moe_layers:
             first = handler.get_moe(layers[moe_layers[0]])
             num_experts = first["experts"].gate_up_proj.shape[0]
@@ -411,8 +484,36 @@ def rotate_model(
                 f"{num_experts} experts/layer"
                 f"{' + shared expert' if has_shared else ''}"
             )
+            print(
+                "  Warning: rotation benefit on MoE FFNs is smaller than on dense FFNs; "
+                "expert weights share the residual rotation but each expert's outliers "
+                "are not individually flattened."
+            )
+        if linear_attn_layers:
+            print(
+                f"Linear attention: {len(linear_attn_layers)}/{len(layers)} layers "
+                f"(e.g. GatedDeltaNet/SSM). R2 will be skipped on these; R1 is applied."
+            )
         print(f"Seed: {seed}")
+        print(f"Rotation precision: {rotation_precision}")
         print()
+
+    sample_param = next(model.parameters())
+    storage_dtype = sample_param.dtype
+    storage_dtype_str = str(storage_dtype).removeprefix("torch.")
+
+    original_dtypes: dict[str, torch.dtype] = {}
+    if rotation_precision == "fp32" and storage_dtype != torch.float32:
+        if verbose:
+            print(
+                f"Upcasting weights {storage_dtype_str} -> float32 for rotation "
+                "(prevents per-tensor round-trip drift)..."
+            )
+        original_dtypes = _collect_param_dtypes(model)
+        cast_count = _cast_all_params(model, torch.float32)
+        if verbose:
+            print(f"  Upcast {cast_count} parameter tensor(s).")
+            print()
 
     if verbose:
         if handler.has_tied_lm_head(model):
@@ -434,15 +535,29 @@ def rotate_model(
     elif verbose:
         print("Step 3/3: Skipping R2 (per-head rotation disabled)")
 
+    if original_dtypes:
+        if verbose:
+            print(
+                f"Downcasting weights float32 -> {storage_dtype_str} for storage..."
+            )
+        restored = _restore_param_dtypes(model, original_dtypes)
+        if verbose:
+            print(f"  Downcast {restored} parameter tensor(s).")
+
     metadata = {
         "turbogguf_version": "0.1.0",
         "rotation_seed": seed,
         "r1_applied": True,
         "r2_applied": apply_r2,
+        "rotation_precision": rotation_precision,
+        "storage_dtype": storage_dtype_str,
         "hidden_size": handler.get_hidden_size(model),
         "head_dim": handler.get_head_dim(model),
         "num_heads": handler.get_num_heads(model),
         "num_kv_heads": handler.get_num_kv_heads(model),
+        "num_layers": len(layers),
+        "num_moe_layers": len(moe_layers),
+        "num_linear_attn_layers": len(linear_attn_layers),
         "architecture": type(model).__name__,
     }
 

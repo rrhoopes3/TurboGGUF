@@ -1,0 +1,15 @@
+# TurboGGUF default calibration prompts (one per non-comment line).
+# Diversity matters more than length: each prompt exercises a different region
+# of activation space so the equivalence gate catches drift that only shows up
+# in narrow contexts (e.g. code, math, dialogue).
+The capital of France is
+Write a Python function that returns the n-th Fibonacci number using memoization.
+Once upon a time, in a quiet village at the foot of a mountain,
+Solve for x: 3x + 7 = 25.
+User: How do I fix a leaking faucet?
+Assistant:
+- apples
+- bananas
+- cherries
+The mitochondrion is the powerhouse of the cell because
+SELECT name FROM users WHERE

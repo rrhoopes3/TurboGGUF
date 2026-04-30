@@ -404,12 +404,17 @@ def export_rotated_model(
 
     # (tokenizer was saved earlier, before the norm-verification gate)
 
-    # Save rotation metadata as sidecar
+    # Save rotation manifest as sidecar. Emits rotation_manifest.json (the
+    # documented name) plus turbogguf_metadata.json for backward compatibility
+    # with any out-of-tree consumers that already read the legacy filename.
     if metadata is not None:
-        meta_path = output_path / "turbogguf_metadata.json"
-        with open(meta_path, "w") as f:
+        manifest_path = output_path / "rotation_manifest.json"
+        with open(manifest_path, "w") as f:
             json.dump(metadata, f, indent=2)
-        print(f"Rotation metadata saved to {meta_path}")
+        legacy_path = output_path / "turbogguf_metadata.json"
+        with open(legacy_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        print(f"Rotation manifest saved to {manifest_path}")
 
     # Compute total size
     total_bytes = sum(
